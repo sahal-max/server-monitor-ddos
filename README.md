@@ -626,14 +626,20 @@ ls -lt /var/log/soc-reports/
 
 ## 📁 Struktur File
 
+**Repositori GitHub** (distribusi):
 ```
-server-monitor-ddos/
-├── monitor-server.sh      # Script monitoring utama
-├── install-monitor.sh     # Script installer / uninstaller
-└── README.md              # Dokumentasi ini
+server-monitor-ddos/          ← https://github.com/sahal-max/server-monitor-ddos
+├── monitor-server.sh          # Script monitoring utama
+├── install-monitor.sh         # Script installer / uninstaller
+└── README.md                  # Dokumentasi ini
+```
 
-Setelah install, file tersimpan di:
-├── /usr/local/bin/monitor-server.sh         # Script (installed)
+> **Catatan:** File script berada di root repositori untuk kemudahan akses via raw URL.
+> Jika Anda clone dari source workspace, script berada di folder `scripts/`.
+
+**Setelah install di server**, file tersimpan di:
+```
+├── /usr/local/bin/monitor-server.sh            # Script (installed)
 ├── /etc/systemd/system/server-monitor.service  # Service file
 ├── /etc/logrotate.d/server-monitor             # Log rotation
 ├── /var/log/server-monitor.log                 # Log utama
