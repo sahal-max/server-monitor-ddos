@@ -166,6 +166,11 @@ StandardOutput=append:/var/log/server-monitor.log
 StandardError=append:/var/log/server-monitor.log
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=full
+ReadWritePaths=/var/log /var/log/soc-reports
+
 [Install]
 WantedBy=multi-user.target
 EOF
