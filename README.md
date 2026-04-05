@@ -115,7 +115,7 @@ Script ini adalah solusi monitoring server all-in-one yang dirancang untuk admin
 
 ```bash
 # Clone repositori
-git clone https://github.com/YOUR_USERNAME/server-monitor-ddos.git
+git clone https://github.com/sahal-max/server-monitor-ddos.git
 cd server-monitor-ddos
 ```
 
@@ -123,8 +123,8 @@ cd server-monitor-ddos
 
 ```bash
 # Download kedua file sekaligus
-curl -O https://raw.githubusercontent.com/YOUR_USERNAME/server-monitor-ddos/main/monitor-server.sh
-curl -O https://raw.githubusercontent.com/YOUR_USERNAME/server-monitor-ddos/main/install-monitor.sh
+curl -O https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/monitor-server.sh
+curl -O https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh
 ```
 
 ### Langkah 2 — Konfigurasi Telegram Bot
@@ -388,8 +388,8 @@ cat /var/log/soc-reports/soc_*.txt | tail -50
 ```bash
 # Download versi terbaru
 cd /tmp
-curl -O https://raw.githubusercontent.com/YOUR_USERNAME/server-monitor-ddos/main/monitor-server.sh
-curl -O https://raw.githubusercontent.com/YOUR_USERNAME/server-monitor-ddos/main/install-monitor.sh
+curl -O https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/monitor-server.sh
+curl -O https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh
 
 # Backup konfigurasi lama
 sudo cp /usr/local/bin/monitor-server.sh /usr/local/bin/monitor-server.sh.bak
