@@ -1,92 +1,157 @@
 #!/bin/bash
 # =============================================================================
-# INSTALLER UNTUK SERVER MONITOR & DDoS DETECTOR
-# Memasang script sebagai systemd service
+# INSTALLER — Server Monitor & DDoS Detector v3.0
+#
+# PENGGUNAAN:
+#   Install baru:
+#     bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
+#       --token "TOKEN_BOT" --chatid "CHAT_ID"
+#
+#   Update script:
+#     bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --update
+#
+#   Uninstall:
+#     bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --uninstall
 # =============================================================================
 
 set -e
 
-SCRIPT_NAME="monitor-server"
-INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}.sh"
+SCRIPT_NAME="server-monitor"
+INSTALL_PATH="/usr/local/bin/monitor-server.sh"
 SERVICE_FILE="/etc/systemd/system/${SCRIPT_NAME}.service"
-LOG_DIR="/var/log"
 REPORT_DIR="/var/log/soc-reports"
+BLOCKED_IPS="/var/log/server-monitor-blocked-ips.txt"
+RAW_URL="https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/monitor-server.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
+
+# =============================================================================
+# Parse argumen
+# =============================================================================
+TOKEN=""
+CHAT_ID=""
+IFACE=""
+MODE="install"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --token)    TOKEN="$2";   shift 2 ;;
+        --chatid)   CHAT_ID="$2"; shift 2 ;;
+        --iface)    IFACE="$2";   shift 2 ;;
+        --update)   MODE="update";    shift ;;
+        --uninstall) MODE="uninstall"; shift ;;
+        -h|--help)  MODE="help";      shift ;;
+        *) echo -e "${RED}[!]${NC} Argumen tidak dikenal: $1"; exit 1 ;;
+    esac
+done
+
+# =============================================================================
+# Utilitas
+# =============================================================================
+
+ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
+info() { echo -e "${BLUE}[*]${NC} $1"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1"; }
+err()  { echo -e "${RED}[✗]${NC} $1"; }
 
 print_header() {
     echo ""
-    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${BLUE}   SERVER MONITOR & DDoS DETECTOR INSTALLER v2.0      ${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${BLUE}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${BLUE}║   SERVER MONITOR & DDoS DETECTOR — INSTALLER v3.0   ║${NC}"
+    echo -e "${BOLD}${BLUE}╚══════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}[ERROR]${NC} Script ini harus dijalankan sebagai root"
-        echo "Gunakan: sudo bash install-monitor.sh"
+        err "Script ini harus dijalankan sebagai root"
+        echo "   Gunakan: sudo bash atau jalankan sebagai root"
         exit 1
     fi
 }
 
-check_dependencies() {
-    echo -e "${BLUE}[*]${NC} Memeriksa dependencies..."
+check_deps() {
+    info "Memeriksa dependencies..."
     local missing=()
-
-    for cmd in bc curl jq ss ps awk; do
-        if ! command -v "$cmd" &>/dev/null; then
-            missing+=("$cmd")
-        fi
+    for cmd in curl awk ss ps; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
-
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${YELLOW}[!]${NC} Dependency yang hilang: ${missing[*]}"
-        echo -e "${BLUE}[*]${NC} Menginstal dependencies..."
-
+        warn "Dependency hilang: ${missing[*]} — menginstal..."
         if command -v apt-get &>/dev/null; then
-            apt-get update -qq
-            apt-get install -y -qq bc curl jq iproute2 procps gawk
+            apt-get update -qq && apt-get install -y -qq curl iproute2 procps gawk
         elif command -v yum &>/dev/null; then
-            yum install -y -q bc curl jq iproute procps gawk
+            yum install -y -q curl iproute procps gawk
         elif command -v dnf &>/dev/null; then
-            dnf install -y -q bc curl jq iproute procps gawk
+            dnf install -y -q curl iproute procps gawk
         else
-            echo -e "${RED}[ERROR]${NC} Package manager tidak ditemukan. Install manual: ${missing[*]}"
+            err "Package manager tidak ditemukan. Install manual: ${missing[*]}"
             exit 1
         fi
     fi
-
-    echo -e "${GREEN}[✓]${NC} Semua dependencies tersedia"
+    ok "Semua dependencies tersedia"
 }
 
-install_script() {
-    echo -e "${BLUE}[*]${NC} Menginstal script monitor..."
-
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-    if [ ! -f "${script_dir}/monitor-server.sh" ]; then
-        echo -e "${RED}[ERROR]${NC} File monitor-server.sh tidak ditemukan di ${script_dir}"
+# =============================================================================
+# Download script utama dari GitHub
+# =============================================================================
+download_monitor() {
+    info "Mendownload monitor-server.sh dari GitHub..."
+    if ! curl -fsSL "$RAW_URL" -o "$INSTALL_PATH"; then
+        err "Gagal download dari GitHub. Cek koneksi internet."
         exit 1
     fi
-
-    cp "${script_dir}/monitor-server.sh" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
-
-    echo -e "${GREEN}[✓]${NC} Script diinstal ke: $INSTALL_PATH"
+    ok "Download berhasil: $INSTALL_PATH"
 }
 
-create_service() {
-    echo -e "${BLUE}[*]${NC} Membuat systemd service..."
+# =============================================================================
+# Konfigurasi token, chatid, interface
+# =============================================================================
+apply_config() {
+    # Token
+    if [ -n "$TOKEN" ]; then
+        sed -i "s|^TELEGRAM_TOKEN=.*|TELEGRAM_TOKEN=\"${TOKEN}\"|" "$INSTALL_PATH"
+        ok "Telegram token dikonfigurasi"
+    else
+        warn "Token tidak diberikan — edit manual: nano $INSTALL_PATH"
+    fi
 
+    # Chat ID
+    if [ -n "$CHAT_ID" ]; then
+        sed -i "s|^CHAT_ID=.*|CHAT_ID=\"${CHAT_ID}\"|" "$INSTALL_PATH"
+        ok "Chat ID dikonfigurasi"
+    else
+        warn "Chat ID tidak diberikan — edit manual: nano $INSTALL_PATH"
+    fi
+
+    # Interface — auto-detect jika tidak disediakan
+    local iface="$IFACE"
+    if [ -z "$iface" ]; then
+        iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+    fi
+    if [ -n "$iface" ]; then
+        sed -i "s|^INTERFACE=.*|INTERFACE=\"${iface}\"|" "$INSTALL_PATH"
+        ok "Interface jaringan: $iface"
+    else
+        warn "Interface tidak terdeteksi — edit manual: nano $INSTALL_PATH"
+    fi
+}
+
+# =============================================================================
+# Buat systemd service
+# =============================================================================
+create_service() {
+    info "Membuat systemd service..."
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Advanced Server Monitor & DDoS Detector with SOC Analysis
+Description=Server Monitor & DDoS Detector v3.0
 After=network.target network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -99,25 +164,16 @@ Restart=always
 RestartSec=10
 StandardOutput=append:/var/log/server-monitor.log
 StandardError=append:/var/log/server-monitor.log
-
-# Security
-NoNewPrivileges=yes
-ProtectSystem=full
-ReadWritePaths=/var/log /var/log/soc-reports
-
-# Environment
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    echo -e "${GREEN}[✓]${NC} Service file dibuat: $SERVICE_FILE"
+    ok "Service file dibuat: $SERVICE_FILE"
 }
 
 setup_logrotate() {
-    echo -e "${BLUE}[*]${NC} Mengatur log rotation..."
-
+    info "Mengatur log rotation..."
     cat > /etc/logrotate.d/server-monitor <<EOF
 /var/log/server-monitor.log {
     daily
@@ -127,9 +183,6 @@ setup_logrotate() {
     missingok
     notifempty
     create 0644 root root
-    postrotate
-        systemctl kill -s HUP ${SCRIPT_NAME}.service 2>/dev/null || true
-    endscript
 }
 
 /var/log/soc-reports/*.txt {
@@ -141,120 +194,186 @@ setup_logrotate() {
     notifempty
 }
 EOF
-
-    echo -e "${GREEN}[✓]${NC} Log rotation dikonfigurasi"
+    ok "Log rotation dikonfigurasi"
 }
 
 enable_service() {
-    echo -e "${BLUE}[*]${NC} Mengaktifkan dan memulai service..."
-
+    info "Mengaktifkan dan menjalankan service..."
     systemctl daemon-reload
-    systemctl enable "${SCRIPT_NAME}.service"
-    systemctl start "${SCRIPT_NAME}.service"
-
+    systemctl enable "${SCRIPT_NAME}.service" &>/dev/null
+    systemctl restart "${SCRIPT_NAME}.service" || systemctl start "${SCRIPT_NAME}.service"
     sleep 2
-
     if systemctl is-active --quiet "${SCRIPT_NAME}.service"; then
-        echo -e "${GREEN}[✓]${NC} Service berhasil berjalan"
+        ok "Service berjalan (active)"
     else
-        echo -e "${RED}[!]${NC} Service gagal start. Cek log: journalctl -u ${SCRIPT_NAME}"
+        warn "Service gagal start. Cek: journalctl -u ${SCRIPT_NAME} -n 30"
     fi
 }
 
-configure_interface() {
+print_install_done() {
+    local iface_used="${IFACE:-$(ip route 2>/dev/null | awk '/default/{print $5; exit}')}"
     echo ""
-    echo -e "${YELLOW}[?]${NC} Mendeteksi interface jaringan..."
-    local default_iface
-    default_iface=$(ip route | grep default | awk '{print $5}' | head -1)
-
-    echo -e "    Interface yang terdeteksi: ${GREEN}${default_iface}${NC}"
-    read -rp "    Gunakan interface ini? [Y/n] (default: Y): " confirm
-    confirm="${confirm:-Y}"
-
-    if [[ "$confirm" =~ ^[Nn] ]]; then
-        read -rp "    Masukkan nama interface: " custom_iface
-        if [ -n "$custom_iface" ]; then
-            sed -i "s/^INTERFACE=.*/INTERFACE=\"${custom_iface}\"/" "$INSTALL_PATH"
-            echo -e "${GREEN}[✓]${NC} Interface diatur ke: $custom_iface"
-        fi
-    else
-        if [ -n "$default_iface" ]; then
-            sed -i "s/^INTERFACE=.*/INTERFACE=\"${default_iface}\"/" "$INSTALL_PATH"
-            echo -e "${GREEN}[✓]${NC} Interface diatur ke: $default_iface"
-        fi
-    fi
-}
-
-configure_telegram() {
-    echo ""
-    echo -e "${YELLOW}[?]${NC} Konfigurasi Telegram (Enter untuk lewati jika sudah dikonfigurasi):"
-
-    read -rp "    Telegram Bot Token [kosongkan jika sudah ada]: " new_token
-    if [ -n "$new_token" ]; then
-        sed -i "s|^TELEGRAM_TOKEN=.*|TELEGRAM_TOKEN=\"${new_token}\"|" "$INSTALL_PATH"
-        echo -e "${GREEN}[✓]${NC} Token diperbarui"
-    fi
-
-    read -rp "    Telegram Chat ID [kosongkan jika sudah ada]: " new_chat_id
-    if [ -n "$new_chat_id" ]; then
-        sed -i "s|^CHAT_ID=.*|CHAT_ID=\"${new_chat_id}\"|" "$INSTALL_PATH"
-        echo -e "${GREEN}[✓]${NC} Chat ID diperbarui"
-    fi
-}
-
-print_summary() {
-    echo ""
-    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}   INSTALASI BERHASIL!${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${GREEN}║              ✅  INSTALASI BERHASIL!                  ║${NC}"
+    echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  📍 Script      : ${INSTALL_PATH}"
     echo -e "  ⚙️  Service     : ${SCRIPT_NAME}.service"
-    echo -e "  📄 Log utama   : /var/log/server-monitor.log"
-    echo -e "  📁 SOC reports : ${REPORT_DIR}/"
+    echo -e "  📄 Log         : /var/log/server-monitor.log"
+    echo -e "  🌐 Interface   : ${iface_used}"
     echo ""
-    echo -e "  ${YELLOW}Perintah berguna:${NC}"
-    echo -e "  ├ Cek status   : systemctl status ${SCRIPT_NAME}"
-    echo -e "  ├ Lihat log    : tail -f /var/log/server-monitor.log"
-    echo -e "  ├ Stop monitor : systemctl stop ${SCRIPT_NAME}"
-    echo -e "  ├ Test Telegram: ${INSTALL_PATH} test-telegram"
-    echo -e "  ├ Test SOC     : ${INSTALL_PATH} test-soc"
-    echo -e "  └ Test resource: ${INSTALL_PATH} test-resources"
+    echo -e "  ${CYAN}${BOLD}Perintah berguna:${NC}"
+    echo -e "  ├ Status       : systemctl status ${SCRIPT_NAME}"
+    echo -e "  ├ Log live     : tail -f /var/log/server-monitor.log"
+    echo -e "  ├ Block IP     : ${INSTALL_PATH} block 1.2.3.4"
+    echo -e "  ├ Unblock IP   : ${INSTALL_PATH} unblock 1.2.3.4"
+    echo -e "  ├ Lihat blokir : ${INSTALL_PATH} listip"
+    echo -e "  └ Test bot     : ${INSTALL_PATH} test-telegram"
     echo ""
-    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+    echo -e "  ${YELLOW}Kirim /start ke bot Telegram untuk membuka menu! 🤖${NC}"
+    echo ""
 }
 
-main() {
+# =============================================================================
+# MODE: INSTALL
+# =============================================================================
+do_install() {
     print_header
     check_root
-    check_dependencies
-    install_script
-    configure_interface
-    configure_telegram
+    check_deps
 
+    # Download dari GitHub (selalu ambil versi terbaru)
+    download_monitor
+
+    # Terapkan konfigurasi
+    apply_config
+
+    # Setup dirs
     mkdir -p "$REPORT_DIR"
+    touch "$BLOCKED_IPS" 2>/dev/null || true
 
+    # Buat & aktifkan service
     create_service
     setup_logrotate
     enable_service
-    print_summary
+    print_install_done
 }
 
-case "${1:-install}" in
-    install)
-        main
-        ;;
-    uninstall)
-        check_root
-        echo -e "${YELLOW}[*]${NC} Menghapus server monitor..."
-        systemctl stop "${SCRIPT_NAME}.service" 2>/dev/null || true
-        systemctl disable "${SCRIPT_NAME}.service" 2>/dev/null || true
-        rm -f "$SERVICE_FILE" "$INSTALL_PATH" /etc/logrotate.d/server-monitor
-        systemctl daemon-reload
-        echo -e "${GREEN}[✓]${NC} Server monitor berhasil dihapus"
-        ;;
-    *)
-        echo "Usage: $0 {install|uninstall}"
+# =============================================================================
+# MODE: UPDATE
+# =============================================================================
+do_update() {
+    print_header
+    check_root
+
+    info "Menghentikan service sementara..."
+    systemctl stop "${SCRIPT_NAME}.service" 2>/dev/null || true
+
+    # Backup konfigurasi yang ada
+    local old_token old_chatid old_iface
+    if [ -f "$INSTALL_PATH" ]; then
+        old_token=$(grep  '^TELEGRAM_TOKEN=' "$INSTALL_PATH" | head -1 | sed 's/TELEGRAM_TOKEN="\(.*\)"/\1/')
+        old_chatid=$(grep '^CHAT_ID='        "$INSTALL_PATH" | head -1 | sed 's/CHAT_ID="\(.*\)"/\1/')
+        old_iface=$(grep  '^INTERFACE='      "$INSTALL_PATH" | head -1 | sed 's/INTERFACE="\(.*\)"/\1/')
+        ok "Konfigurasi lama disimpan (token, chatid, interface)"
+    fi
+
+    # Download versi terbaru
+    download_monitor
+
+    # Restore konfigurasi lama (jika tidak ada yg baru dari argumen)
+    [ -z "$TOKEN" ]   && TOKEN="$old_token"
+    [ -z "$CHAT_ID" ] && CHAT_ID="$old_chatid"
+    [ -z "$IFACE" ]   && IFACE="$old_iface"
+    apply_config
+
+    # Restart
+    systemctl start "${SCRIPT_NAME}.service"
+    sleep 2
+
+    if systemctl is-active --quiet "${SCRIPT_NAME}.service"; then
+        echo ""
+        echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BOLD}${GREEN}║              ✅  UPDATE BERHASIL!                     ║${NC}"
+        echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  Script diperbarui ke versi terbaru dari GitHub."
+        echo -e "  Konfigurasi token & interface dipertahankan."
+        echo -e "  Service berjalan kembali: ${SCRIPT_NAME}.service"
+        echo ""
+    else
+        err "Service gagal restart. Cek: journalctl -u ${SCRIPT_NAME} -n 30"
         exit 1
-        ;;
+    fi
+}
+
+# =============================================================================
+# MODE: UNINSTALL
+# =============================================================================
+do_uninstall() {
+    print_header
+    check_root
+
+    echo -e "${YELLOW}Ini akan menghapus server monitor dari sistem ini.${NC}"
+    echo -e "Log dan daftar IP blocked ${BOLD}tidak${NC} akan dihapus."
+    echo ""
+    read -rp "Lanjutkan? [y/N]: " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Dibatalkan."; exit 0; }
+
+    info "Menghentikan dan menonaktifkan service..."
+    systemctl stop    "${SCRIPT_NAME}.service" 2>/dev/null || true
+    systemctl disable "${SCRIPT_NAME}.service" 2>/dev/null || true
+
+    info "Menghapus file..."
+    rm -f "$SERVICE_FILE"
+    rm -f "$INSTALL_PATH"
+    rm -f /etc/logrotate.d/server-monitor
+    systemctl daemon-reload
+
+    echo ""
+    ok "Server monitor berhasil dihapus."
+    echo -e "  Log masih tersimpan di: /var/log/server-monitor.log"
+    echo -e "  IP blocked list       : $BLOCKED_IPS"
+    echo ""
+}
+
+# =============================================================================
+# MODE: HELP
+# =============================================================================
+do_help() {
+    print_header
+    cat <<HELP
+${BOLD}PENGGUNAAN:${NC}
+
+  ${CYAN}Install baru:${NC}
+    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \\
+      --token "TOKEN_BOT" --chatid "CHAT_ID"
+
+  ${CYAN}Install dengan interface custom:${NC}
+    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \\
+      --token "TOKEN_BOT" --chatid "CHAT_ID" --iface "eth0"
+
+  ${CYAN}Update ke versi terbaru:${NC}
+    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --update
+
+  ${CYAN}Uninstall:${NC}
+    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --uninstall
+
+${BOLD}PARAMETER:${NC}
+  --token TOKEN     Telegram Bot Token dari @BotFather
+  --chatid CHATID   Telegram Chat ID (grup atau pribadi)
+  --iface IFACE     Interface jaringan (default: auto-detect)
+  --update          Update script tanpa mengubah konfigurasi
+  --uninstall       Hapus service dan script dari sistem
+HELP
+}
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+case "$MODE" in
+    install)   do_install   ;;
+    update)    do_update    ;;
+    uninstall) do_uninstall ;;
+    help)      do_help      ;;
 esac
