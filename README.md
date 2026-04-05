@@ -125,15 +125,13 @@ Total diblokir: 3 IP
 Cukup jalankan perintah ini di server, ganti `TOKEN_BOT` dan `CHAT_ID` dengan milik Anda:
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
-  --token "TOKEN_BOT" --chatid "CHAT_ID"
+curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --token "TOKEN_BOT" --chatid "CHAT_ID"
 ```
 
 Interface jaringan otomatis terdeteksi. Untuk set manual tambahkan `--iface eth0`:
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
-  --token "TOKEN_BOT" --chatid "CHAT_ID" --iface "eth0"
+curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --token "TOKEN_BOT" --chatid "CHAT_ID" --iface "eth0"
 ```
 
 > **Cara dapat Chat ID:** Tambahkan bot ke grup → kirim pesan → buka `https://api.telegram.org/bot<TOKEN>/getUpdates`
@@ -333,13 +331,13 @@ Script secara otomatis menganalisis log sistem dan mengirim laporan keamanan set
 Konfigurasi (token, chatid, interface) otomatis dipertahankan dari instalasi sebelumnya:
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --update
+curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --update
 ```
 
 ### ⚡ Uninstall — 1 Perintah
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --uninstall
+curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --uninstall
 ```
 
 > ⚠️ Log dan daftar IP blocked tidak ikut terhapus: `/var/log/server-monitor.log`, `/var/log/soc-reports/`, `/var/log/server-monitor-blocked-ips.txt`
