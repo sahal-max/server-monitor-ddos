@@ -125,14 +125,14 @@ Total diblokir: 3 IP
 Cukup jalankan perintah ini di server, ganti `TOKEN_BOT` dan `CHAT_ID` dengan milik Anda:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
+sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
   --token "TOKEN_BOT" --chatid "CHAT_ID"
 ```
 
 Interface jaringan otomatis terdeteksi. Untuk set manual tambahkan `--iface eth0`:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
+sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
   --token "TOKEN_BOT" --chatid "CHAT_ID" --iface "eth0"
 ```
 
@@ -333,13 +333,13 @@ Script secara otomatis menganalisis log sistem dan mengirim laporan keamanan set
 Konfigurasi (token, chatid, interface) otomatis dipertahankan dari instalasi sebelumnya:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --update
+sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --update
 ```
 
 ### ⚡ Uninstall — 1 Perintah
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --uninstall
+sudo bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --uninstall
 ```
 
 > ⚠️ Log dan daftar IP blocked tidak ikut terhapus: `/var/log/server-monitor.log`, `/var/log/soc-reports/`, `/var/log/server-monitor-blocked-ips.txt`
