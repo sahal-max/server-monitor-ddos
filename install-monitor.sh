@@ -240,6 +240,17 @@ print_install_done() {
 do_install() {
     print_header
     check_root
+
+    # Validasi parameter wajib
+    if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
+        err "Parameter --token dan --chatid wajib diisi untuk instalasi baru."
+        echo ""
+        echo -e "  Contoh:"
+        echo -e "  ${CYAN}bash <(curl -s ${RAW_URL%monitor-server.sh}install-monitor.sh) --token \"TOKEN\" --chatid \"CHATID\"${NC}"
+        echo ""
+        exit 1
+    fi
+
     check_deps
 
     # Download dari GitHub (selalu ambil versi terbaru)
@@ -313,12 +324,6 @@ do_update() {
 do_uninstall() {
     print_header
     check_root
-
-    echo -e "${YELLOW}Ini akan menghapus server monitor dari sistem ini.${NC}"
-    echo -e "Log dan daftar IP blocked ${BOLD}tidak${NC} akan dihapus."
-    echo ""
-    read -rp "Lanjutkan? [y/N]: " confirm
-    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Dibatalkan."; exit 0; }
 
     info "Menghentikan dan menonaktifkan service..."
     systemctl stop    "${SCRIPT_NAME}.service" 2>/dev/null || true
