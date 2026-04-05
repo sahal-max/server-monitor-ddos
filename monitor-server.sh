@@ -64,8 +64,8 @@ RX_MBPS="0.00"; TX_MBPS="0.00"; AVG_RX_MBPS="0.00"
 ACTIVE_CONN=0; CURR_RX_BYTES=0; CURR_TX_BYTES=0
 
 BOT_OFFSET=0
-BOT_WAITING_IP=""     # chat_id yang sedang menunggu input IP
-BOT_WAITING_ACTION="" # "block" atau "unblock"
+# Gunakan file temp untuk state IP waiting (agar bisa diakses dari subprocess)
+BOT_STATE_FILE="/tmp/server-monitor-bot-state"
 
 # =============================================================================
 # 📋 UTILITAS
@@ -76,7 +76,21 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [${2:-INFO}] $1" >> "$LOG_FILE"; }
 init_dirs() {
     mkdir -p "$REPORT_DIR"
     touch "$LOG_FILE" "$IP_BLOCK_LIST" 2>/dev/null || LOG_FILE="/tmp/server-monitor.log"
+    echo "" > "$BOT_STATE_FILE"  # Format: "chat_id action"
     log "Server Monitor v3.0 started | iface=$INTERFACE"
+}
+
+# Baca state waiting IP dari file
+bot_get_waiting() {
+    [ -f "$BOT_STATE_FILE" ] && cat "$BOT_STATE_FILE" || echo ""
+}
+
+bot_set_waiting() {
+    echo "$1 $2" > "$BOT_STATE_FILE"
+}
+
+bot_clear_waiting() {
+    echo "" > "$BOT_STATE_FILE"
 }
 
 get_domain() {
@@ -662,6 +676,8 @@ MSG
 
 handle_command() {
     local chat_id="$1" text="$2"
+    # Strip trailing whitespace/newline
+    text=$(echo "$text" | tr -d '\r\n' | sed 's/ *$//')
 
     case "$text" in
         /start|/menu|/help)
@@ -670,12 +686,10 @@ handle_command() {
 🤖 <b>SERVER MONITOR BOT</b>
 ${LINE}
 Halo! Saya memantau server Anda secara real-time.
-Pilih menu di bawah ini:" \
-                "$KB_MAIN"
+Pilih menu di bawah ini:" "$KB_MAIN"
             ;;
         /status)
-            local smsg; smsg=$(build_status_menu)
-            send_menu "$chat_id" "$smsg" "$KB_BACK"
+            send_menu "$chat_id" "$(build_status_menu)" "$KB_BACK"
             ;;
         /block*)
             local ip; ip=$(echo "$text" | awk '{print $2}')
@@ -684,9 +698,9 @@ Pilih menu di bawah ini:" \
             else
                 local res; res=$(ip_block "$ip")
                 case "$res" in
-                    OK)        send_telegram_chat "$chat_id" "✅ IP <code>${ip}</code> berhasil diblokir" ;;
-                    EXISTS)    send_telegram_chat "$chat_id" "ℹ️ IP <code>${ip}</code> sudah diblokir sebelumnya" ;;
-                    INVALID)   send_telegram_chat "$chat_id" "❌ Format IP tidak valid: <code>${ip}</code>" ;;
+                    OK)      send_telegram_chat "$chat_id" "✅ IP <code>${ip}</code> berhasil diblokir" ;;
+                    EXISTS)  send_telegram_chat "$chat_id" "ℹ️ IP <code>${ip}</code> sudah diblokir" ;;
+                    INVALID) send_telegram_chat "$chat_id" "❌ Format IP tidak valid: <code>${ip}</code>" ;;
                 esac
             fi
             ;;
@@ -705,12 +719,15 @@ Pilih menu di bawah ini:" \
         /listip)
             send_menu "$chat_id" "$(build_ip_list_msg)" "$KB_BACK"
             ;;
+        /batal)
+            bot_clear_waiting
+            send_menu "$chat_id" "❌ Dibatalkan." "$KB_IP"
+            ;;
     esac
 }
 
 handle_callback() {
     local chat_id="$1" msg_id="$2" cb_id="$3" data="$4"
-
     answer_callback "$cb_id" ""
 
     case "$data" in
@@ -725,8 +742,7 @@ ${LINE}
 Pilih menu:" "$KB_MAIN"
             ;;
         status)
-            local smsg; smsg=$(build_status_menu)
-            edit_menu "$chat_id" "$msg_id" "$smsg" "$KB_BACK"
+            edit_menu "$chat_id" "$msg_id" "$(build_status_menu)" "$KB_BACK"
             ;;
         network)
             edit_menu "$chat_id" "$msg_id" "$(build_network_menu)" "$KB_BACK"
@@ -744,8 +760,7 @@ Pilih tindakan:" "$KB_IP"
             edit_menu "$chat_id" "$msg_id" "$(build_ip_list_msg)" "$KB_BACK"
             ;;
         ip_add)
-            BOT_WAITING_IP="$chat_id"
-            BOT_WAITING_ACTION="block"
+            bot_set_waiting "$chat_id" "block"
             edit_menu "$chat_id" "$msg_id" \
 "${LINE}
 🚫 <b>TAMBAH IP BLOCK</b>
@@ -753,17 +768,16 @@ ${LINE}
 Kirim IP address yang ingin diblokir.
 
 Contoh: <code>192.168.1.100</code>
-Atau dengan prefix: <code>10.0.0.0/24</code>
+Atau CIDR: <code>10.0.0.0/24</code>
 
-Ketik /batal untuk membatalkan." "$KB_BACK"
+Kirim /batal untuk membatalkan." "$KB_BACK"
             ;;
         ip_del)
             if [ "$(ip_count)" -eq 0 ]; then
                 answer_callback "$cb_id" "Tidak ada IP yang diblokir"
                 return
             fi
-            BOT_WAITING_IP="$chat_id"
-            BOT_WAITING_ACTION="unblock"
+            bot_set_waiting "$chat_id" "unblock"
             edit_menu "$chat_id" "$msg_id" \
 "${LINE}
 ✅ <b>HAPUS BLOCK IP</b>
@@ -772,13 +786,11 @@ ${LINE}
 <code>$(ip_list)</code>
 
 Kirim IP yang ingin di-unblock.
-Ketik /batal untuk membatalkan." "$KB_BACK"
+Kirim /batal untuk membatalkan." "$KB_BACK"
             ;;
         soc)
-            get_ram_usage; CPU_USAGE=$(get_cpu_usage)
             local failed; failed=$(get_failed_ssh_count)
-            local smsg; smsg=$(msg_soc "$(get_domain)" "$failed")
-            edit_menu "$chat_id" "$msg_id" "$smsg" "$KB_BACK"
+            edit_menu "$chat_id" "$msg_id" "$(msg_soc "$(get_domain)" "$failed")" "$KB_BACK"
             ;;
         procs)
             edit_menu "$chat_id" "$msg_id" "$(msg_top_procs "$(get_domain)")" "$KB_BACK"
@@ -786,29 +798,21 @@ Ketik /batal untuk membatalkan." "$KB_BACK"
         refresh)
             answer_callback "$cb_id" "🔄 Memperbarui data..."
             get_ram_usage; CPU_USAGE=$(get_cpu_usage); ACTIVE_CONN=$(get_active_connections)
-            local smsg; smsg=$(build_status_menu)
-            edit_menu "$chat_id" "$msg_id" "$smsg" "$KB_BACK"
+            edit_menu "$chat_id" "$msg_id" "$(build_status_menu)" "$KB_BACK"
             ;;
     esac
 }
 
 handle_ip_input() {
-    local chat_id="$1" text="$2"
-
-    if [ "$text" = "/batal" ]; then
-        BOT_WAITING_IP=""
-        BOT_WAITING_ACTION=""
-        send_menu "$chat_id" "❌ Dibatalkan." "$KB_IP"
-        return
-    fi
-
-    local ip; ip=$(echo "$text" | tr -d ' ')
+    local chat_id="$1" text="$2" action="$3"
+    local ip; ip=$(echo "$text" | tr -d ' \r\n')
     local res
 
-    if [ "$BOT_WAITING_ACTION" = "block" ]; then
+    if [ "$action" = "block" ]; then
         res=$(ip_block "$ip")
         case "$res" in
             OK)
+                bot_clear_waiting
                 send_menu "$chat_id" \
 "✅ <b>IP Berhasil Diblokir!</b>
 
@@ -817,24 +821,25 @@ handle_ip_input() {
 📋 Total blokir: $(ip_count) IP" "$KB_IP"
                 ;;
             EXISTS)
+                bot_clear_waiting
                 send_menu "$chat_id" "ℹ️ IP <code>${ip}</code> sudah ada di daftar block." "$KB_IP"
                 ;;
             INVALID)
                 send_telegram_chat "$chat_id" \
 "❌ <b>Format IP tidak valid!</b>
 
-Contoh yang benar:
+Contoh:
 • <code>192.168.1.100</code>
 • <code>10.0.0.0/24</code>
 
-Coba kirim lagi:"
-                return
+Coba kirim lagi, atau /batal"
                 ;;
         esac
-    elif [ "$BOT_WAITING_ACTION" = "unblock" ]; then
+    elif [ "$action" = "unblock" ]; then
         res=$(ip_unblock "$ip")
         case "$res" in
             OK)
+                bot_clear_waiting
                 send_menu "$chat_id" \
 "✅ <b>IP Berhasil Di-unblock!</b>
 
@@ -843,88 +848,116 @@ Coba kirim lagi:"
 📋 Sisa blokir: $(ip_count) IP" "$KB_IP"
                 ;;
             NOT_FOUND)
-                send_menu "$chat_id" \
-"❌ IP <code>${ip}</code> tidak ditemukan di daftar block.
+                send_telegram_chat "$chat_id" \
+"❌ IP <code>${ip}</code> tidak ditemukan.
 
 <b>IP yang tersedia:</b>
-<code>$(ip_list)</code>" "$KB_IP"
+<code>$(ip_list)</code>
+
+Coba lagi, atau /batal"
                 ;;
         esac
     fi
-
-    BOT_WAITING_IP=""
-    BOT_WAITING_ACTION=""
 }
 
 # =============================================================================
-# 🔄 BOT POLLING LOOP
+# 🔄 BOT POLLING LOOP — menggunakan jq untuk parsing JSON
 # =============================================================================
 
 run_bot_listener() {
-    log "Bot listener started (polling)"
+    log "Bot listener started (jq polling)"
+
+    # Pastikan jq tersedia
+    if ! command -v jq &>/dev/null; then
+        log "jq tidak ditemukan, mencoba install..." "WARN"
+        if command -v apt-get &>/dev/null; then
+            apt-get install -y -qq jq 2>/dev/null
+        elif command -v yum &>/dev/null; then
+            yum install -y -q jq 2>/dev/null
+        fi
+        if ! command -v jq &>/dev/null; then
+            log "jq tidak bisa diinstall — bot tidak bisa berjalan" "ERROR"
+            return 1
+        fi
+    fi
+
+    local offset=0
 
     while true; do
         local resp
-        resp=$(get_updates 2>/dev/null)
+        resp=$(curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates" \
+            -H "Content-Type: application/json" \
+            -d "{\"offset\":${offset},\"timeout\":5,\"allowed_updates\":[\"message\",\"callback_query\"]}" \
+            --connect-timeout 10 --max-time 20 2>/dev/null)
 
-        if ! echo "$resp" | grep -q '"ok":true'; then
+        # Cek ok
+        local ok; ok=$(echo "$resp" | jq -r '.ok // false' 2>/dev/null)
+        if [ "$ok" != "true" ]; then
+            log "getUpdates failed: $(echo "$resp" | jq -r '.description // "unknown"' 2>/dev/null)" "WARN"
             sleep 5; continue
         fi
 
-        # Count updates
-        local count
-        count=$(echo "$resp" | grep -o '"update_id"' | wc -l)
+        # Hitung jumlah update
+        local count; count=$(echo "$resp" | jq '.result | length' 2>/dev/null || echo 0)
         [ "$count" -eq 0 ] && sleep 1 && continue
 
-        # Process each update
-        local i=1
-        while [ "$i" -le "$count" ]; do
-            local upd
-            upd=$(echo "$resp" | awk -v n="$i" 'BEGIN{d=0;c=0}
-                /"update_id"/{c++;if(c==n)d=1}
-                d{print}
-                d&&/^\s*\}/{if(d){d=0;exit}}' 2>/dev/null || echo "")
+        # Proses tiap update
+        local idx=0
+        while [ "$idx" -lt "$count" ]; do
+            local upd; upd=$(echo "$resp" | jq ".result[$idx]" 2>/dev/null)
+            local upd_id; upd_id=$(echo "$upd" | jq -r '.update_id' 2>/dev/null)
 
-            local upd_id chat_id text data msg_id cb_id
+            # Update offset untuk next request
+            offset=$((upd_id + 1))
+            log "Processing update #${upd_id}" "DEBUG"
 
-            upd_id=$(echo "$resp" | grep -o '"update_id":[0-9]*' | awk -v n="$i" 'NR==n{gsub(/[^0-9]/,"",$0);print}')
+            # Cek tipe update
+            local has_cb; has_cb=$(echo "$upd" | jq 'has("callback_query")' 2>/dev/null)
 
-            if [ -n "$upd_id" ]; then
-                BOT_OFFSET=$((upd_id + 1))
-            fi
+            if [ "$has_cb" = "true" ]; then
+                # === CALLBACK QUERY ===
+                local cb_id cb_data cb_chat_id cb_msg_id
+                cb_id=$(echo "$upd"     | jq -r '.callback_query.id')
+                cb_data=$(echo "$upd"   | jq -r '.callback_query.data')
+                cb_chat_id=$(echo "$upd" | jq -r '.callback_query.message.chat.id')
+                cb_msg_id=$(echo "$upd"  | jq -r '.callback_query.message.message_id')
 
-            # Try to parse via raw grep on the full response (per update_id offset)
-            local raw_update
-            raw_update=$(echo "$resp" | grep -A 100 "\"update_id\":${upd_id}" | head -80)
+                log "Callback: data=${cb_data} chat=${cb_chat_id}"
+                handle_callback "$cb_chat_id" "$cb_msg_id" "$cb_id" "$cb_data"
 
-            # Extract message fields
-            chat_id=$(echo "$raw_update" | grep -o '"id":-\?[0-9]*' | head -1 | grep -o '-\?[0-9]*')
-            msg_id=$(echo "$raw_update" | grep -o '"message_id":[0-9]*' | head -1 | grep -o '[0-9]*$')
-            text=$(echo "$raw_update" | grep '"text"' | head -1 | sed 's/.*"text":"\(.*\)".*/\1/' | sed 's/\\//g')
-            cb_id=$(echo "$raw_update" | grep '"callback_query"' | head -1)
-            data=$(echo "$raw_update" | grep '"data"' | head -1 | sed 's/.*"data":"\(.*\)".*/\1/')
+            else
+                local has_msg; has_msg=$(echo "$upd" | jq 'has("message")' 2>/dev/null)
+                if [ "$has_msg" = "true" ]; then
+                    # === MESSAGE ===
+                    local msg_chat_id msg_text
+                    msg_chat_id=$(echo "$upd" | jq -r '.message.chat.id')
+                    msg_text=$(echo "$upd"    | jq -r '.message.text // ""')
 
-            if [ -n "$cb_id" ] && [ -n "$data" ]; then
-                # It's a callback query
-                local cq_id
-                cq_id=$(echo "$raw_update" | grep '"id"' | grep -v '"user"\|"chat"\|"message"' | head -1 | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
-                chat_id=$(echo "$raw_update" | grep -o '"id":-\?[0-9]*' | head -2 | tail -1 | grep -o '-\?[0-9]*')
-                cq_id=$(echo "$raw_update" | sed -n 's/.*"callback_query".*"id":"\([^"]*\)".*/\1/p' | head -1)
-                msg_id=$(echo "$raw_update" | grep -o '"message_id":[0-9]*' | head -1 | grep -o '[0-9]*$')
-                handle_callback "$chat_id" "$msg_id" "$cq_id" "$data"
-            elif [ -n "$text" ] && [ -n "$chat_id" ]; then
-                # It's a message
-                if [ "$chat_id" = "$BOT_WAITING_IP" ] && [ -n "$BOT_WAITING_ACTION" ]; then
-                    handle_ip_input "$chat_id" "$text"
-                elif echo "$text" | grep -q '^/'; then
-                    handle_command "$chat_id" "$text"
+                    [ -z "$msg_text" ] && idx=$((idx+1)) && continue
+                    log "Message: chat=${msg_chat_id} text=${msg_text:0:40}"
+
+                    # Cek apakah sedang menunggu input IP
+                    local state; state=$(bot_get_waiting)
+                    local wait_chat; wait_chat=$(echo "$state" | awk '{print $1}')
+                    local wait_action; wait_action=$(echo "$state" | awk '{print $2}')
+
+                    if [ -n "$wait_chat" ] && [ "$msg_chat_id" = "$wait_chat" ] && [ -n "$wait_action" ]; then
+                        if [ "$msg_text" = "/batal" ]; then
+                            bot_clear_waiting
+                            send_menu "$msg_chat_id" "❌ Dibatalkan." "$KB_IP"
+                        else
+                            handle_ip_input "$msg_chat_id" "$msg_text" "$wait_action"
+                        fi
+                    else
+                        # Proses sebagai command
+                        handle_command "$msg_chat_id" "$msg_text"
+                    fi
                 fi
             fi
 
-            i=$((i+1))
+            idx=$((idx+1))
         done
-
-        sleep 1
     done
 }
 
