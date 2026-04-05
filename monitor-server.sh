@@ -1,49 +1,48 @@
 #!/bin/bash
 # =============================================================================
-# ADVANCED SERVER MONITOR & DDoS DETECTOR WITH SOC CREDENTIAL ANALYSIS
-# Version: 2.0.0
-# Description: Comprehensive server monitoring with Telegram notifications
+# ADVANCED SERVER MONITOR + DDoS DETECTOR + TELEGRAM BOT
+# Version: 3.0.0
 # Features:
-#   - Network monitoring (RX/TX Mbps) with DDoS detection
-#   - CPU, RAM, Disk monitoring with alerts
-#   - Active connection monitoring with top IPs/ports
-#   - ASCII sparkline graphs for trends
-#   - Top processes by CPU and RAM
-#   - SOC credential analysis (failed logins, brute force, SSH sessions)
-#   - Telegram notifications with formatted HTML messages
+#   ✅ Monitoring jaringan (RX/TX) + deteksi DDoS
+#   ✅ Monitoring CPU, RAM, Disk, Koneksi
+#   ✅ SOC Credential Analysis (brute force, SSH, sudo)
+#   ✅ Telegram Bot interaktif dengan menu inline keyboard
+#   ✅ Manajemen IP: block / unblock / lihat daftar
+#   ✅ Notifikasi rapi dan konsisten
+#   ✅ Grafik sparkline ASCII
 # =============================================================================
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # =============================================================================
-# KONFIGURASI — Sesuaikan sebelum dijalankan
+# ⚙️  KONFIGURASI — Edit sesuai kebutuhan
 # =============================================================================
-THRESHOLD_MBPS=150            # Ambang batas DDoS dalam Mbps (integer)
-THRESHOLD_CPU=85              # Ambang batas CPU (%)
-THRESHOLD_RAM=90              # Ambang batas RAM (%)
-THRESHOLD_DISK=90             # Ambang batas Disk (%)
-THRESHOLD_CONN=5000           # Ambang batas koneksi aktif
-THRESHOLD_FAILED_LOGIN=20     # Ambang batas failed login per 5 menit
+THRESHOLD_MBPS=150
+THRESHOLD_CPU=85
+THRESHOLD_RAM=90
+THRESHOLD_DISK=90
+THRESHOLD_CONN=5000
+THRESHOLD_FAILED_LOGIN=20
 
-INTERFACE="ens3"              # Interface jaringan (contoh: eth0, ens3, ens18)
-SLEEP_INTERVAL=1              # Interval sampling (detik)
-SAMPLE_COUNT=10               # Jumlah sampel untuk rata-rata network
+INTERFACE="ens3"
+SLEEP_INTERVAL=1
+SAMPLE_COUNT=10
 
 TELEGRAM_TOKEN="7628118358:AAGmaZ5gziNQ_nO8CX5uMUuWkZ8IKrnIpt4"
 CHAT_ID="-1002440680876"
 
 LOG_FILE="/var/log/server-monitor.log"
 REPORT_DIR="/var/log/soc-reports"
-GRAPH_HISTORY=20              # Jumlah titik data untuk grafik sparkline
+IP_BLOCK_LIST="/var/log/server-monitor-blocked-ips.txt"
+GRAPH_HISTORY=20
 
-# Interval notifikasi (detik)
-NOTIFY_INTERVAL_DDOS=10       # Notifikasi DDoS setiap 10 detik
-NOTIFY_INTERVAL_NORMAL=1800   # Laporan normal setiap 30 menit
-NOTIFY_INTERVAL_ALERT=300     # Alert CPU/RAM/Disk setiap 5 menit
-NOTIFY_INTERVAL_SOC=600       # Laporan SOC setiap 10 menit
+NOTIFY_INTERVAL_DDOS=10
+NOTIFY_INTERVAL_NORMAL=1800
+NOTIFY_INTERVAL_ALERT=300
+NOTIFY_INTERVAL_SOC=600
 
 # =============================================================================
-# STATE VARIABLES
+# 🔧 STATE
 # =============================================================================
 LAST_NOTIFY_DDOS=0
 LAST_NOTIFY_NORMAL=0
@@ -56,980 +55,1116 @@ LAST_NOTIFY_SOC=0
 declare -a NET_HISTORY=()
 declare -a CPU_HISTORY=()
 declare -a RAM_HISTORY=()
-declare -a CONN_HISTORY=()
 declare -a NET_SAMPLES=()
 
 CPU_USAGE="0.0"
 RAM_PERCENT="0.0"
-RAM_USED_MB=0
-RAM_TOTAL_MB=0
-RAM_AVAILABLE_MB=0
-SWAP_USED_MB=0
-SWAP_TOTAL_MB=0
-RX_MBPS="0.00"
-TX_MBPS="0.00"
-AVG_RX_MBPS="0.00"
-ACTIVE_CONN=0
-CURR_RX_BYTES=0
-CURR_TX_BYTES=0
+RAM_USED_MB=0; RAM_TOTAL_MB=0; SWAP_USED_MB=0; SWAP_TOTAL_MB=0
+RX_MBPS="0.00"; TX_MBPS="0.00"; AVG_RX_MBPS="0.00"
+ACTIVE_CONN=0; CURR_RX_BYTES=0; CURR_TX_BYTES=0
+
+BOT_OFFSET=0
+BOT_WAITING_IP=""     # chat_id yang sedang menunggu input IP
+BOT_WAITING_ACTION="" # "block" atau "unblock"
 
 # =============================================================================
-# UTILITAS DASAR
+# 📋 UTILITAS
 # =============================================================================
 
-log() {
-    local msg="$1"
-    local level="${2:-INFO}"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [$level] $msg" >> "$LOG_FILE"
-}
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [${2:-INFO}] $1" >> "$LOG_FILE"; }
 
 init_dirs() {
     mkdir -p "$REPORT_DIR"
-    touch "$LOG_FILE" 2>/dev/null || { LOG_FILE="/tmp/server-monitor.log"; touch "$LOG_FILE"; }
-    log "Server Monitor v2.0 started | interface=$INTERFACE"
+    touch "$LOG_FILE" "$IP_BLOCK_LIST" 2>/dev/null || LOG_FILE="/tmp/server-monitor.log"
+    log "Server Monitor v3.0 started | iface=$INTERFACE"
 }
 
 get_domain() {
-    if [ -f /etc/xray/domain ]; then
-        cat /etc/xray/domain
-    elif hostname -f &>/dev/null 2>&1; then
-        hostname -f
-    else
-        hostname 2>/dev/null || echo "server"
-    fi
+    [ -f /etc/xray/domain ] && cat /etc/xray/domain && return
+    hostname -f 2>/dev/null || hostname 2>/dev/null || echo "server"
 }
 
-# Perbandingan float menggunakan awk (pengganti bc)
-float_ge() {
-    awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0 >= b+0)}'
-}
+float_ge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0 >= b+0)}'; }
+float_gt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0 > b+0)}'; }
 
-float_gt() {
-    awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0 > b+0)}'
+# =============================================================================
+# 📡 TELEGRAM API
+# =============================================================================
+
+tg_post() {
+    local endpoint="$1"; shift
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/${endpoint}" \
+        "$@" --connect-timeout 10 --max-time 20 2>/dev/null
 }
 
 send_telegram() {
-    local message="$1"
-    local response
-
-    response=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+    local text="$1"
+    tg_post "sendMessage" \
         --data-urlencode "chat_id=${CHAT_ID}" \
-        --data-urlencode "text=${message}" \
-        --data-urlencode "parse_mode=HTML" \
-        --connect-timeout 10 \
-        --max-time 20 2>/dev/null)
+        --data-urlencode "text=${text}" \
+        --data-urlencode "parse_mode=HTML" > /dev/null
+    log "Notification sent"
+}
 
-    if echo "$response" | grep -q '"ok":true'; then
-        log "Telegram OK"
-        return 0
-    else
-        log "Telegram FAIL: $(echo "$response" | head -c 200)" "ERROR"
-        return 1
-    fi
+send_telegram_chat() {
+    local chat_id="$1" text="$2"
+    tg_post "sendMessage" \
+        --data-urlencode "chat_id=${chat_id}" \
+        --data-urlencode "text=${text}" \
+        --data-urlencode "parse_mode=HTML" > /dev/null
+}
+
+send_menu() {
+    local chat_id="$1" text="$2" keyboard="$3"
+    tg_post "sendMessage" \
+        -d "chat_id=${chat_id}" \
+        --data-urlencode "text=${text}" \
+        -d "parse_mode=HTML" \
+        -d "reply_markup=${keyboard}" > /dev/null
+}
+
+edit_menu() {
+    local chat_id="$1" msg_id="$2" text="$3" keyboard="$4"
+    tg_post "editMessageText" \
+        -d "chat_id=${chat_id}" \
+        -d "message_id=${msg_id}" \
+        --data-urlencode "text=${text}" \
+        -d "parse_mode=HTML" \
+        -d "reply_markup=${keyboard}" > /dev/null
+}
+
+answer_callback() {
+    local callback_id="$1" text="$2"
+    tg_post "answerCallbackQuery" \
+        -d "callback_query_id=${callback_id}" \
+        --data-urlencode "text=${text}" > /dev/null
+}
+
+delete_message() {
+    local chat_id="$1" msg_id="$2"
+    tg_post "deleteMessage" -d "chat_id=${chat_id}" -d "message_id=${msg_id}" > /dev/null
+}
+
+get_updates() {
+    tg_post "getUpdates" \
+        -d "offset=${BOT_OFFSET}" \
+        -d "timeout=3" \
+        -d "allowed_updates=[\"message\",\"callback_query\"]"
 }
 
 # =============================================================================
-# MONITORING JARINGAN
+# 🌐 MONITORING JARINGAN
 # =============================================================================
 
-get_rx_bytes() {
-    awk '/'"$INTERFACE"':/{print $2}' /proc/net/dev 2>/dev/null || echo 0
-}
-
-get_tx_bytes() {
-    awk '/'"$INTERFACE"':/{print $10}' /proc/net/dev 2>/dev/null || echo 0
-}
+get_rx_bytes() { awk '/'"$INTERFACE"':/{print $2}' /proc/net/dev 2>/dev/null || echo 0; }
+get_tx_bytes() { awk '/'"$INTERFACE"':/{print $10}' /proc/net/dev 2>/dev/null || echo 0; }
 
 calc_mbps() {
-    local bytes=$1
-    local interval=${2:-1}
-    awk -v b="$bytes" -v i="$interval" 'BEGIN{printf "%.2f", (b*8)/(1000000*i)}'
+    awk -v b="$1" -v i="${2:-1}" 'BEGIN{printf "%.2f",(b*8)/(1000000*i)}'
 }
 
 get_network_stats() {
-    local prev_rx=$1
-    local prev_tx=$2
     local curr_rx curr_tx rx_diff tx_diff
-
-    curr_rx=$(get_rx_bytes)
-    curr_tx=$(get_tx_bytes)
-
-    rx_diff=$((curr_rx - prev_rx))
-    tx_diff=$((curr_tx - prev_tx))
+    curr_rx=$(get_rx_bytes); curr_tx=$(get_tx_bytes)
+    rx_diff=$((curr_rx - $1)); tx_diff=$((curr_tx - $2))
     [ "$rx_diff" -lt 0 ] && rx_diff=0
     [ "$tx_diff" -lt 0 ] && tx_diff=0
-
     RX_MBPS=$(calc_mbps "$rx_diff" "$SLEEP_INTERVAL")
     TX_MBPS=$(calc_mbps "$tx_diff" "$SLEEP_INTERVAL")
-    CURR_RX_BYTES=$curr_rx
-    CURR_TX_BYTES=$curr_tx
+    CURR_RX_BYTES=$curr_rx; CURR_TX_BYTES=$curr_tx
 }
 
 update_net_samples() {
     NET_SAMPLES+=("$RX_MBPS")
-    if [ "${#NET_SAMPLES[@]}" -gt "$SAMPLE_COUNT" ]; then
-        NET_SAMPLES=("${NET_SAMPLES[@]:1}")
-    fi
+    [ "${#NET_SAMPLES[@]}" -gt "$SAMPLE_COUNT" ] && NET_SAMPLES=("${NET_SAMPLES[@]:1}")
 }
 
 get_avg_rx() {
-    local count=${#NET_SAMPLES[@]}
-    [ "$count" -eq 0 ] && echo "0.00" && return
-
-    local vals=""
-    for s in "${NET_SAMPLES[@]}"; do
-        vals="$vals $s"
-    done
-
-    awk -v vals="$vals" -v n="$count" 'BEGIN{
-        split(vals,a," ")
-        t=0; for(i in a) t+=a[i]
-        printf "%.2f", t/n
-    }'
+    local count=${#NET_SAMPLES[@]}; [ "$count" -eq 0 ] && echo "0.00" && return
+    local vals=""; for s in "${NET_SAMPLES[@]}"; do vals="$vals $s"; done
+    awk -v vals="$vals" -v n="$count" 'BEGIN{split(vals,a," ");t=0;for(i in a)t+=a[i];printf "%.2f",t/n}'
 }
 
 # =============================================================================
-# MONITORING CPU
+# 💻 MONITORING CPU
 # =============================================================================
 
 get_cpu_usage() {
-    if [ ! -f /proc/stat ]; then
-        echo "0.0"; return
-    fi
-
-    local snap1 snap2
-    snap1=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8}' /proc/stat)
-    sleep 0.5
-    snap2=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8}' /proc/stat)
-
-    awk -v s1="$snap1" -v s2="$snap2" 'BEGIN{
+    [ ! -f /proc/stat ] && echo "0.0" && return
+    local s1 s2
+    s1=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8}' /proc/stat)
+    sleep 0.3
+    s2=$(awk 'NR==1{print $2,$3,$4,$5,$6,$7,$8}' /proc/stat)
+    awk -v s1="$s1" -v s2="$s2" 'BEGIN{
         n=split(s1,a," "); split(s2,b," ")
-        t1=0; t2=0
-        for(i=1;i<=n;i++){t1+=a[i]; t2+=b[i]}
+        t1=0;t2=0; for(i=1;i<=n;i++){t1+=a[i];t2+=b[i]}
         di=b[4]-a[4]; dt=t2-t1
-        if(dt>0) printf "%.1f",(dt-di)*100/dt
-        else print "0.0"
+        printf "%.1f",(dt>0)?(dt-di)*100/dt:0
     }'
 }
 
 get_cpu_load() {
-    uptime 2>/dev/null | awk -F'load average:' '{gsub(/,/,"",$2); print $2}' | xargs || echo "0 0 0"
+    uptime 2>/dev/null | awk -F'load average:' '{gsub(/,/,"",$2);print $2}' | xargs || echo "0 0 0"
 }
 
-get_top_cpu_processes() {
-    ps aux --sort=-%cpu 2>/dev/null | awk 'NR>1 && NR<=6{
-        cmd=$11; if(length(cmd)>28) cmd=substr(cmd,1,25)"..."
-        printf "%-8s %5s%%  %-28s\n",$1,$3,cmd
-    }' 2>/dev/null || echo "N/A"
+get_top_cpu_procs() {
+    ps aux --sort=-%cpu 2>/dev/null | awk 'NR>1&&NR<=6{
+        cmd=$11; if(length(cmd)>22) cmd=substr(cmd,1,19)"..."
+        printf "  %-8s %5s%%  %s\n",$1,$3,cmd
+    }' || echo "  N/A"
 }
 
 # =============================================================================
-# MONITORING RAM
+# 🧠 MONITORING RAM
 # =============================================================================
 
 get_ram_usage() {
     local total avail used
-
     total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 1)
     avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
     used=$((total - avail))
-
-    RAM_TOTAL_MB=$((total / 1024))
-    RAM_USED_MB=$((used / 1024))
-    RAM_AVAILABLE_MB=$((avail / 1024))
-    RAM_PERCENT=$(awk -v u="$used" -v t="$total" 'BEGIN{
-        if(t>0) printf "%.1f",u*100/t; else print "0.0"
-    }')
-
-    local swap_total swap_free
-    swap_total=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    swap_free=$(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    SWAP_USED_MB=$(( (swap_total - swap_free) / 1024 ))
-    SWAP_TOTAL_MB=$((swap_total / 1024))
+    RAM_TOTAL_MB=$((total/1024)); RAM_USED_MB=$((used/1024))
+    RAM_PERCENT=$(awk -v u="$used" -v t="$total" 'BEGIN{printf "%.1f",(t>0)?u*100/t:0}')
+    local st sf
+    st=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    sf=$(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    SWAP_USED_MB=$(( (st-sf)/1024 )); SWAP_TOTAL_MB=$((st/1024))
 }
 
-get_top_ram_processes() {
-    ps aux --sort=-%mem 2>/dev/null | awk 'NR>1 && NR<=6{
-        cmd=$11; if(length(cmd)>28) cmd=substr(cmd,1,25)"..."
-        printf "%-8s %5s%%  %-28s\n",$1,$4,cmd
-    }' 2>/dev/null || echo "N/A"
+get_top_ram_procs() {
+    ps aux --sort=-%mem 2>/dev/null | awk 'NR>1&&NR<=6{
+        cmd=$11; if(length(cmd)>22) cmd=substr(cmd,1,19)"..."
+        printf "  %-8s %5s%%  %s\n",$1,$4,cmd
+    }' || echo "  N/A"
 }
 
 # =============================================================================
-# MONITORING DISK
+# 💿 MONITORING DISK & KONEKSI
 # =============================================================================
 
 get_disk_info() {
-    df -h / 2>/dev/null | awk 'NR==2{
-        gsub(/%/,"",$5)
-        print $2","$3","$4","$5
-    }' || echo "N/A,N/A,N/A,0"
+    df -h / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $2","$3","$4","$5}' || echo "N/A,N/A,N/A,0"
 }
-
-get_biggest_dirs() {
-    du -sh /var /home /tmp /usr /opt 2>/dev/null | sort -rh | head -5 | \
-    awk '{printf "  %-8s %s\n",$1,$2}' || echo "  N/A"
-}
-
-# =============================================================================
-# MONITORING KONEKSI
-# =============================================================================
 
 get_active_connections() {
-    local count=0
-    if command -v ss &>/dev/null; then
-        count=$(ss -tan 2>/dev/null | awk 'NR>1 && $1=="ESTAB"' | wc -l)
-    elif command -v netstat &>/dev/null; then
-        count=$(netstat -an 2>/dev/null | grep -c ESTABLISHED)
-    fi
-    echo "${count:-0}"
-}
-
-get_connection_states() {
-    if command -v ss &>/dev/null; then
-        ss -tan 2>/dev/null | awk 'NR>1{states[$1]++}
-        END{for(s in states) printf "%s:%d\n",s,states[s]}' | \
-        sort -t: -k2 -rn | head -5 | awk '{printf "  %-12s %s\n",$1,$2}' FS=':'
-    fi
+    local c=0
+    command -v ss &>/dev/null && c=$(ss -tan 2>/dev/null | awk 'NR>1&&$1=="ESTAB"' | wc -l) || \
+    command -v netstat &>/dev/null && c=$(netstat -an 2>/dev/null | grep -c ESTABLISHED)
+    echo "${c:-0}"
 }
 
 get_top_ips() {
-    if command -v ss &>/dev/null; then
-        ss -tan 2>/dev/null | awk 'NR>1 && $1=="ESTAB"{
-            n=split($5,a,":")
-            ip=(n>=4) ? a[1]":"a[2]":"a[3]":"a[4] : a[1]
-            count[ip]++
-        }END{for(ip in count) print count[ip],ip}' | \
-        sort -rn | head -5 | awk '{printf "  %-6s %s\n",$1,$2}'
-    fi
+    ss -tan 2>/dev/null | awk 'NR>1&&$1=="ESTAB"{
+        n=split($5,a,":"); ip=(n>=4)?a[1]":"a[2]":"a[3]":"a[4]:a[1]; count[ip]++
+    }END{for(ip in count) print count[ip],ip}' | sort -rn | head -5 | \
+    awk '{printf "  %-5s %s\n",$1,$2}' || echo "  N/A"
 }
 
-get_top_ports() {
-    if command -v ss &>/dev/null; then
-        ss -tan 2>/dev/null | awk 'NR>1 && $1=="ESTAB"{
-            n=split($4,a,":"); port=a[n]; count[port]++
-        }END{for(p in count) print count[p],p}' | \
-        sort -rn | head -5 | awk '{printf "  %-6s port %s\n",$1,$2}'
-    fi
+get_conn_states() {
+    ss -tan 2>/dev/null | awk 'NR>1{s[$1]++}END{for(x in s) printf "  %-12s %d\n",x,s[x]}' | \
+    sort -t' ' -k2 -rn | head -5 || echo "  N/A"
 }
 
 # =============================================================================
-# SOC - ANALISIS KEAMANAN DAN LOG CREDENTIAL
+# 🛡️  IP MANAGEMENT
+# =============================================================================
+
+ip_block() {
+    local ip="$1"
+    # Validate IP format
+    if ! echo "$ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]+)?$'; then
+        echo "INVALID"
+        return 1
+    fi
+    # Check if already blocked
+    if grep -qF "$ip" "$IP_BLOCK_LIST" 2>/dev/null; then
+        echo "EXISTS"
+        return 1
+    fi
+    # Block with iptables if available
+    if command -v iptables &>/dev/null; then
+        iptables -I INPUT -s "$ip" -j DROP 2>/dev/null
+        iptables -I FORWARD -s "$ip" -j DROP 2>/dev/null
+    fi
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $ip" >> "$IP_BLOCK_LIST"
+    log "IP blocked: $ip" "WARN"
+    echo "OK"
+}
+
+ip_unblock() {
+    local ip="$1"
+    if ! grep -qF "$ip" "$IP_BLOCK_LIST" 2>/dev/null; then
+        echo "NOT_FOUND"
+        return 1
+    fi
+    if command -v iptables &>/dev/null; then
+        iptables -D INPUT -s "$ip" -j DROP 2>/dev/null
+        iptables -D FORWARD -s "$ip" -j DROP 2>/dev/null
+    fi
+    sed -i "/$ip/d" "$IP_BLOCK_LIST"
+    log "IP unblocked: $ip"
+    echo "OK"
+}
+
+ip_list() {
+    if [ ! -s "$IP_BLOCK_LIST" ]; then
+        echo "  (Tidak ada IP yang diblokir)"
+        return
+    fi
+    local count=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        count=$((count+1))
+        local ts ip
+        ts=$(echo "$line" | awk '{print $1,$2}')
+        ip=$(echo "$line" | awk '{print $3}')
+        printf "  %2d. %-18s %s\n" "$count" "$ip" "$ts"
+    done < "$IP_BLOCK_LIST"
+}
+
+ip_count() {
+    grep -c '.' "$IP_BLOCK_LIST" 2>/dev/null || echo 0
+}
+
+# =============================================================================
+# 🔍 SOC
 # =============================================================================
 
 find_auth_log() {
     for f in /var/log/auth.log /var/log/secure /var/log/messages; do
         [ -f "$f" ] && echo "$f" && return
-    done
-    echo ""
+    done; echo ""
 }
 
 get_failed_ssh_count() {
-    local logfile
-    logfile=$(find_auth_log)
-    [ -z "$logfile" ] && echo 0 && return
-
-    grep -c "Failed password\|Invalid user\|authentication failure" "$logfile" 2>/dev/null || echo 0
+    local lf; lf=$(find_auth_log); [ -z "$lf" ] && echo 0 && return
+    grep -c "Failed password\|Invalid user\|authentication failure" "$lf" 2>/dev/null || echo 0
 }
 
 get_top_failed_ips() {
-    local logfile
-    logfile=$(find_auth_log)
-    [ -z "$logfile" ] && echo "  (auth log tidak ditemukan)" && return
-
-    grep -i "Failed password\|Invalid user" "$logfile" 2>/dev/null | \
-    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | \
-    sort | uniq -c | sort -rn | head -5 | \
-    awk '{printf "  %-6s %s\n",$1,$2}' || echo "  Tidak ada"
+    local lf; lf=$(find_auth_log)
+    [ -z "$lf" ] && echo "  (auth log tidak ditemukan)" && return
+    grep -i "Failed password\|Invalid user" "$lf" 2>/dev/null | \
+    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort | uniq -c | sort -rn | head -5 | \
+    awk '{printf "  %-5s %s\n",$1,$2}' || echo "  Tidak ada"
 }
 
 get_brute_force_ips() {
-    local logfile
-    logfile=$(find_auth_log)
-    [ -z "$logfile" ] && echo "  (auth log tidak ditemukan)" && return
-
-    local result
-    result=$(grep -i "Failed password" "$logfile" 2>/dev/null | \
-    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | \
-    sort | uniq -c | sort -rn | awk '$1>=10{printf "  %-6s %s (%d percobaan)\n",$1,$2,$1}' | head -5)
-
-    echo "${result:-  Tidak ada}"
+    local lf; lf=$(find_auth_log)
+    [ -z "$lf" ] && echo "  (auth log tidak ditemukan)" && return
+    local r; r=$(grep -i "Failed password" "$lf" 2>/dev/null | \
+    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort | uniq -c | sort -rn | \
+    awk '$1>=10{printf "  %-5s %s\n",$1,$2}' | head -5)
+    echo "${r:-  Tidak ada}"
 }
 
-get_successful_logins() {
-    local logfile
-    logfile=$(find_auth_log)
-    [ -z "$logfile" ] && echo "  (auth log tidak ditemukan)" && return
-
-    grep -i "Accepted password\|Accepted publickey" "$logfile" 2>/dev/null | \
-    tail -5 | awk '{
-        for(i=1;i<=NF;i++){
-            if($i=="user") user=$(i+1)
-            if($i=="from") ip=$(i+1)
-        }
-        printf "  %-12s dari %s\n", user, ip
-    }' || echo "  Tidak ada"
-}
-
-get_active_ssh_sessions() {
-    local sessions
-    sessions=$(who 2>/dev/null | awk '{print "  "$1,$5}')
-    echo "${sessions:-  Tidak ada sesi aktif}"
-}
-
-get_sudo_events() {
-    local logfile
-    logfile=$(find_auth_log)
-    [ -z "$logfile" ] && echo "  (auth log tidak ditemukan)" && return
-
-    grep "sudo:" "$logfile" 2>/dev/null | tail -5 | \
-    awk '{
-        user=""; cmd=""
-        for(i=1;i<=NF;i++){
-            if($i ~ /USER=/) user=substr($i,6)
-            if($i ~ /COMMAND=/) {cmd=substr($i,9); break}
-        }
-        if(user) printf "  %-12s -> %s\n",user,substr(cmd,1,40)
-    }' || echo "  Tidak ada"
-}
-
-get_port_scan_count() {
-    local count=0
-    for f in /var/log/syslog /var/log/messages /var/log/kern.log; do
-        if [ -f "$f" ]; then
-            count=$(grep -ci "port scan\|SCAN\|SYN flood\|nmap\|masscan" "$f" 2>/dev/null || echo 0)
-            break
-        fi
-    done
-    echo "$count"
+get_active_ssh() {
+    local s; s=$(who 2>/dev/null | awk '{print "  "$1" ("$5")"}')
+    echo "${s:-  Tidak ada sesi aktif}"
 }
 
 generate_soc_report() {
-    local ts
-    ts=$(date '+%Y-%m-%d_%H-%M-%S')
-    local rfile="${REPORT_DIR}/soc_${ts}.txt"
-
+    local ts; ts=$(date '+%Y-%m-%d_%H-%M-%S')
+    local rf="${REPORT_DIR}/soc_${ts}.txt"
     {
-        echo "══════════════════════════════════════════════════"
-        echo "   SOC SECURITY & CREDENTIAL ANALYSIS REPORT"
-        echo "   Host   : $(get_domain)"
-        echo "   Time   : $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "══════════════════════════════════════════════════"
-        printf "\n[FAILED LOGIN ATTEMPTS - 5min]\n"
-        echo "  Total: $(get_failed_ssh_count)"
-        printf "\n[TOP ATTACKER IPs]\n"
-        get_top_failed_ips
-        printf "\n[BRUTE FORCE (>=10 attempts)]\n"
-        get_brute_force_ips
-        printf "\n[SUCCESSFUL LOGINS]\n"
-        get_successful_logins
-        printf "\n[ACTIVE SSH SESSIONS]\n"
-        get_active_ssh_sessions
-        printf "\n[SUDO EVENTS]\n"
-        get_sudo_events
-        printf "\n[PORT SCAN ATTEMPTS]\n"
-        echo "  Count: $(get_port_scan_count)"
-        printf "\n[CONNECTION STATES]\n"
-        get_connection_states
-        printf "\n[TOP CONNECTED IPs]\n"
-        get_top_ips
-        echo ""
-        echo "══════════════════════════════════════════════════"
-    } > "$rfile"
-
-    echo "$rfile"
+        echo "══════════════════════════════════════════"
+        echo "  SOC SECURITY REPORT — $(get_domain)"
+        echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "══════════════════════════════════════════"
+        printf "\n[FAILED LOGIN]\nTotal: $(get_failed_ssh_count)\n"
+        printf "\n[TOP ATTACKER IPs]\n"; get_top_failed_ips
+        printf "\n[BRUTE FORCE (>=10)]\n"; get_brute_force_ips
+        printf "\n[ACTIVE SSH]\n"; get_active_ssh
+        printf "\n[BLOCKED IPs]\n"; ip_list
+        echo "══════════════════════════════════════════"
+    } > "$rf"
+    echo "$rf"
 }
 
 # =============================================================================
-# GRAFIK ASCII (SPARKLINE)
+# 📊 GRAFIK ASCII
 # =============================================================================
 
 make_bar() {
-    local value=$1
-    local max=${2:-100}
-    local width=${3:-20}
-
-    awk -v v="$value" -v m="$max" -v w="$width" 'BEGIN{
-        filled=int(v*w/m)
-        if(filled>w) filled=w
-        bar=""
-        for(i=0;i<filled;i++) bar=bar"█"
-        for(i=filled;i<w;i++) bar=bar"░"
-        print bar
+    local v=$1 m=${2:-100} w=${3:-16}
+    awk -v v="$v" -v m="$m" -v w="$w" 'BEGIN{
+        f=int(v*w/m); if(f>w)f=w
+        b=""; for(i=0;i<f;i++)b=b"█"; for(i=f;i<w;i++)b=b"░"
+        print b
     }'
 }
 
 make_sparkline() {
-    local -a arr=("$@")
-    [ ${#arr[@]} -eq 0 ] && echo "▁▁▁▁▁" && return
-
-    local vals=""
-    for v in "${arr[@]}"; do vals="$vals $v"; done
-
+    local -a arr=("$@"); [ ${#arr[@]} -eq 0 ] && echo "▁" && return
+    local vals=""; for v in "${arr[@]}"; do vals="$vals $v"; done
     awk -v vals="$vals" 'BEGIN{
         n=split(vals,a," ")
-        chars[0]="▁"; chars[1]="▂"; chars[2]="▃"; chars[3]="▄"
-        chars[4]="▅"; chars[5]="▆"; chars[6]="▇"; chars[7]="█"
-        mx=0
-        for(i=1;i<=n;i++) if(a[i]+0>mx) mx=a[i]+0
-        if(mx==0) mx=1
-        line=""
-        for(i=1;i<=n;i++){
-            idx=int(a[i]*7/mx)
-            if(idx>7) idx=7
-            if(idx<0) idx=0
-            line=line chars[idx]
-        }
-        print line
+        c[0]="▁";c[1]="▂";c[2]="▃";c[3]="▄";c[4]="▅";c[5]="▆";c[6]="▇";c[7]="█"
+        mx=0; for(i=1;i<=n;i++) if(a[i]+0>mx) mx=a[i]+0; if(mx==0)mx=1
+        s=""; for(i=1;i<=n;i++){idx=int(a[i]*7/mx);if(idx>7)idx=7;s=s c[idx]}
+        print s
     }'
 }
 
 update_history() {
-    local net_int cpu_int ram_int
-    net_int=$(awk -v v="$AVG_RX_MBPS" 'BEGIN{printf "%d",v+0}')
-    cpu_int=$(awk -v v="$CPU_USAGE" 'BEGIN{printf "%d",v+0}')
-    ram_int=$(awk -v v="$RAM_PERCENT" 'BEGIN{printf "%d",v+0}')
-
-    NET_HISTORY+=("$net_int")
-    CPU_HISTORY+=("$cpu_int")
-    RAM_HISTORY+=("$ram_int")
-    CONN_HISTORY+=("$ACTIVE_CONN")
-
+    local ni ci ri
+    ni=$(awk -v v="$AVG_RX_MBPS" 'BEGIN{printf "%d",v}')
+    ci=$(awk -v v="$CPU_USAGE"   'BEGIN{printf "%d",v}')
+    ri=$(awk -v v="$RAM_PERCENT" 'BEGIN{printf "%d",v}')
+    NET_HISTORY+=("$ni"); CPU_HISTORY+=("$ci"); RAM_HISTORY+=("$ri")
     [ "${#NET_HISTORY[@]}" -gt "$GRAPH_HISTORY" ] && NET_HISTORY=("${NET_HISTORY[@]:1}")
     [ "${#CPU_HISTORY[@]}" -gt "$GRAPH_HISTORY" ] && CPU_HISTORY=("${CPU_HISTORY[@]:1}")
     [ "${#RAM_HISTORY[@]}" -gt "$GRAPH_HISTORY" ] && RAM_HISTORY=("${RAM_HISTORY[@]:1}")
-    [ "${#CONN_HISTORY[@]}" -gt "$GRAPH_HISTORY" ] && CONN_HISTORY=("${CONN_HISTORY[@]:1}")
 }
 
-status_icon() {
-    local val=$1
-    local hi=$2
-    local warn
-    warn=$(awk -v h="$hi" 'BEGIN{printf "%d",h*0.75}')
-
-    if float_ge "$val" "$hi"; then
-        echo "🔴"
-    elif float_ge "$val" "$warn"; then
-        echo "🟡"
-    else
-        echo "🟢"
-    fi
+status_dot() {
+    local v=$1 hi=$2
+    local warn; warn=$(awk -v h="$hi" 'BEGIN{printf "%d",h*0.75}')
+    float_ge "$v" "$hi" && echo "🔴" && return
+    float_ge "$v" "$warn" && echo "🟡" && return
+    echo "🟢"
 }
 
 # =============================================================================
-# PESAN TELEGRAM
+# 💬 PESAN NOTIFIKASI (Format rapi)
 # =============================================================================
 
-msg_ddos_alert() {
-    local domain="$1"
-    local avg_rx="$2"
-    local net_spark="$3"
+LINE="▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰"
+
+msg_ddos() {
+    local dom="$1" avg="$2" spark="$3"
     cat <<MSG
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🚨 <b>DDOS ATTACK DETECTED</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 <b>Domain :</b> ${domain}
-🕐 <b>Waktu  :</b> $(date '+%Y-%m-%d %H:%M:%S')
+${LINE}
+🚨 <b>SERANGAN DDoS TERDETEKSI!</b>
+${LINE}
+🖥 Server  : <b>${dom}</b>
+📅 Waktu   : $(date '+%d/%m/%Y %H:%M:%S')
 
-📊 <b>Trafik Jaringan</b>
-├ ⬇ RX Avg : <b>${avg_rx} Mb/s</b>
-├ ⬇ RX Now : ${RX_MBPS} Mb/s
-├ ⬆ TX Now : ${TX_MBPS} Mb/s
-└ 🔗 Koneksi: <b>${ACTIVE_CONN}</b>
+📶 <b>Trafik Masuk</b>
+├ Rata-rata : <b>${avg} Mbps</b>
+├ Sekarang  : ${RX_MBPS} Mbps ↑  ${TX_MBPS} Mbps ↓
+└ Koneksi   : <b>${ACTIVE_CONN}</b> aktif
 
-📈 <b>Tren (${GRAPH_HISTORY}s):</b> <code>${net_spark}</code>
-⚡ <b>Ambang :</b> ${THRESHOLD_MBPS} Mb/s
+📈 Tren 20 detik:
+<code>${spark}</code>
 
-━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ <b>Tindakan yang disarankan:</b>
-• Periksa dan blokir IP penyerang
-• Aktifkan rate limiting di firewall
-• Hubungi provider upstream
-━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ Batas aman : ${THRESHOLD_MBPS} Mbps
+${LINE}
+⚠️ <b>Segera blokir IP penyerang!</b>
 MSG
 }
 
-msg_status_report() {
-    local domain="$1"
-    local avg_rx="$2"
+msg_status() {
+    local dom="$1" avg="$2"
+    local di ds du da dp
+    IFS=',' read -r ds du da dp <<< "$(get_disk_info)"
 
-    local disk_info disk_size disk_used disk_avail disk_pct
-    disk_info=$(get_disk_info)
-    IFS=',' read -r disk_size disk_used disk_avail disk_pct <<< "$disk_info"
+    local nd cd rd
+    nd=$(status_dot "${AVG_RX_MBPS%.*}" "$THRESHOLD_MBPS")
+    cd=$(status_dot "${CPU_USAGE%.*}" "$THRESHOLD_CPU")
+    rd=$(status_dot "${RAM_PERCENT%.*}" "$THRESHOLD_RAM")
+    local dd; dd=$(status_dot "${dp:-0}" "$THRESHOLD_DISK")
+    local od; od=$(status_dot "$ACTIVE_CONN" "$THRESHOLD_CONN")
 
-    local net_icon cpu_icon ram_icon disk_icon conn_icon
-    net_icon=$(status_icon "${AVG_RX_MBPS%.*}" "$THRESHOLD_MBPS")
-    cpu_icon=$(status_icon "${CPU_USAGE%.*}" "$THRESHOLD_CPU")
-    ram_icon=$(status_icon "${RAM_PERCENT%.*}" "$THRESHOLD_RAM")
-    disk_icon=$(status_icon "${disk_pct:-0}" "$THRESHOLD_DISK")
-    conn_icon=$(status_icon "$ACTIVE_CONN" "$THRESHOLD_CONN")
+    local nsp csp rsp
+    nsp=$(make_sparkline "${NET_HISTORY[@]}")
+    csp=$(make_sparkline "${CPU_HISTORY[@]}")
+    rsp=$(make_sparkline "${RAM_HISTORY[@]}")
 
-    local net_spark cpu_spark ram_spark
-    net_spark=$(make_sparkline "${NET_HISTORY[@]}")
-    cpu_spark=$(make_sparkline "${CPU_HISTORY[@]}")
-    ram_spark=$(make_sparkline "${RAM_HISTORY[@]}")
-
-    local cpu_bar ram_bar disk_bar
-    cpu_bar=$(make_bar "${CPU_USAGE%.*}" 100 18)
-    ram_bar=$(make_bar "${RAM_PERCENT%.*}" 100 18)
-    disk_bar=$(make_bar "${disk_pct:-0}" 100 18)
-
-    local load
-    load=$(get_cpu_load)
+    local cb rb
+    cb=$(make_bar "${CPU_USAGE%.*}" 100 14)
+    rb=$(make_bar "${RAM_PERCENT%.*}" 100 14)
 
     cat <<MSG
-━━━━━━━━━━━━━━━━━━━━━━━━━
-📡 <b>SERVER STATUS REPORT</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 <b>Domain :</b> ${domain}
-🕐 <b>Waktu  :</b> $(date '+%Y-%m-%d %H:%M:%S')
-⏱ <b>Uptime :</b> $(uptime -p 2>/dev/null || uptime | sed 's/.*up /up /' | cut -d',' -f1-2)
+${LINE}
+📊 <b>LAPORAN STATUS SERVER</b>
+${LINE}
+🖥 Server  : <b>${dom}</b>
+📅 Waktu   : $(date '+%d/%m/%Y %H:%M:%S')
+⏱ Uptime  : $(uptime -p 2>/dev/null || echo "N/A")
 
-━━━ 🌐 JARINGAN ━━━━━━━━━
-${net_icon} RX avg : <b>${avg_rx} Mb/s</b>  TX: ${TX_MBPS} Mb/s
-📈 Tren : <code>${net_spark}</code>
+${nd} <b>Jaringan</b>
+   ↑ RX : ${avg} Mbps (avg)  ↓ TX : ${TX_MBPS} Mbps
+   <code>${nsp}</code>
 
-━━━ 💻 CPU ━━━━━━━━━━━━━━
-${cpu_icon} Pakai : <b>${CPU_USAGE}%</b>  Load: ${load}
-<code>${cpu_bar}</code> ${CPU_USAGE}%
-📈 Tren: <code>${cpu_spark}</code>
+${cd} <b>CPU</b> — ${CPU_USAGE}%
+   <code>${cb}</code> Load: $(get_cpu_load | awk '{print $1}')
+   <code>${csp}</code>
 
-━━━ 🧠 RAM ━━━━━━━━━━━━━━
-${ram_icon} Pakai : <b>${RAM_PERCENT}%</b>  (${RAM_USED_MB}/${RAM_TOTAL_MB} MB)
-<code>${ram_bar}</code> ${RAM_PERCENT}%
-🔄 Swap: ${SWAP_USED_MB}/${SWAP_TOTAL_MB} MB
-📈 Tren: <code>${ram_spark}</code>
+${rd} <b>RAM</b> — ${RAM_PERCENT}% (${RAM_USED_MB}/${RAM_TOTAL_MB} MB)
+   <code>${rb}</code> Swap: ${SWAP_USED_MB}/${SWAP_TOTAL_MB} MB
+   <code>${rsp}</code>
 
-━━━ 💿 DISK ━━━━━━━━━━━━━
-${disk_icon} Pakai : <b>${disk_pct}%</b>  (${disk_used}/${disk_size}, sisa ${disk_avail})
-<code>${disk_bar}</code> ${disk_pct}%
+${dd} <b>Disk</b> — ${dp}% (${du}/${ds}, sisa ${da})
 
-━━━ 🔗 KONEKSI ━━━━━━━━━━
-${conn_icon} Aktif : <b>${ACTIVE_CONN}</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ <b>Status: NORMAL</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
+${od} <b>Koneksi</b> — ${ACTIVE_CONN} aktif
+${LINE}
+✅ <i>Semua dalam batas normal</i>
 MSG
 }
 
-msg_top_processes() {
-    local domain="$1"
-    local top_cpu top_ram
-    top_cpu=$(get_top_cpu_processes)
-    top_ram=$(get_top_ram_processes)
-
+msg_alert() {
+    local dom="$1" type="$2" val="$3" thr="$4" detail="$5"
     cat <<MSG
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🔬 <b>TOP PROSES SERVER</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 <b>Domain:</b> ${domain}
-🕐 <b>Waktu:</b> $(date '+%Y-%m-%d %H:%M:%S')
-
-💻 <b>CPU (Top 5):</b>
-<code>USER      CPU%    COMMAND
-${top_cpu}</code>
-
-🧠 <b>RAM (Top 5):</b>
-<code>USER      MEM%    COMMAND
-${top_ram}</code>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-MSG
-}
-
-msg_resource_alert() {
-    local domain="$1"
-    local alert_type="$2"
-    local value="$3"
-    local threshold="$4"
-    local detail="$5"
-
-    cat <<MSG
-━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ <b>ALERT: ${alert_type}</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 <b>Domain    :</b> ${domain}
-🕐 <b>Waktu     :</b> $(date '+%Y-%m-%d %H:%M:%S')
-📊 <b>Nilai     :</b> <b>${value}</b>
-⚡ <b>Threshold :</b> ${threshold}
+${LINE}
+⚠️ <b>ALERT: ${type}</b>
+${LINE}
+🖥 Server : <b>${dom}</b>
+📅 Waktu  : $(date '+%d/%m/%Y %H:%M:%S')
+📊 Nilai  : <b>${val}</b>
+🔴 Batas  : ${thr}
 
 ${detail}
-━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ <b>Segera periksa server!</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
+${LINE}
 MSG
 }
 
-msg_soc_report() {
-    local domain="$1"
-    local failed_count="$2"
-
-    local threat_level="✅ RENDAH"
-    if [ "${failed_count:-0}" -ge "$THRESHOLD_FAILED_LOGIN" ]; then
-        threat_level="🔴 TINGGI"
-    elif [ "${failed_count:-0}" -ge $((THRESHOLD_FAILED_LOGIN / 2)) ]; then
-        threat_level="🟡 SEDANG"
-    fi
-
-    local top_failed brute_ips active_sess port_scans
-    top_failed=$(get_top_failed_ips)
-    brute_ips=$(get_brute_force_ips)
-    active_sess=$(get_active_ssh_sessions)
-    port_scans=$(get_port_scan_count)
-
+msg_soc() {
+    local dom="$1" failed="$2"
+    local lvl="✅ Rendah"
+    [ "${failed:-0}" -ge "$THRESHOLD_FAILED_LOGIN" ] && lvl="🔴 TINGGI"
+    [ "${failed:-0}" -ge $((THRESHOLD_FAILED_LOGIN/2)) ] && \
+        [ "${failed:-0}" -lt "$THRESHOLD_FAILED_LOGIN" ] && lvl="🟡 Sedang"
     cat <<MSG
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🛡️ <b>SOC CREDENTIAL REPORT</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 <b>Domain:</b> ${domain}
-🕐 <b>Waktu:</b> $(date '+%Y-%m-%d %H:%M:%S')
-🚦 <b>Level Ancaman:</b> ${threat_level}
+${LINE}
+🛡 <b>LAPORAN KEAMANAN SOC</b>
+${LINE}
+🖥 Server : <b>${dom}</b>
+📅 Waktu  : $(date '+%d/%m/%Y %H:%M:%S')
+🚦 Ancaman: ${lvl}
 
-🔐 <b>LOGIN GAGAL (5 menit):</b>
-  Jumlah: <b>${failed_count}</b>
+🔐 <b>Login Gagal (5 mnt):</b> <b>${failed}</b>
 
-📍 <b>TOP IP PENYERANG:</b>
-<code>${top_failed}</code>
+📍 <b>Top IP Penyerang:</b>
+<code>$(get_top_failed_ips)</code>
 
-🚫 <b>BRUTE FORCE (≥10 attempt):</b>
-<code>${brute_ips}</code>
+🚫 <b>Brute Force (≥10x):</b>
+<code>$(get_brute_force_ips)</code>
 
-👥 <b>SESI SSH AKTIF:</b>
-<code>${active_sess}</code>
+👤 <b>SSH Aktif:</b>
+<code>$(get_active_ssh)</code>
 
-🔍 <b>PORT SCAN TERDETEKSI:</b> ${port_scans}
-━━━━━━━━━━━━━━━━━━━━━━━━━
+🔒 <b>IP Diblokir:</b> $(ip_count)
+${LINE}
+MSG
+}
+
+msg_top_procs() {
+    local dom="$1"
+    cat <<MSG
+${LINE}
+🔬 <b>TOP PROSES SERVER</b>
+${LINE}
+🖥 Server : <b>${dom}</b>
+📅 Waktu  : $(date '+%d/%m/%Y %H:%M:%S')
+
+💻 <b>CPU teratas:</b>
+<code>$(get_top_cpu_procs)</code>
+
+🧠 <b>RAM teratas:</b>
+<code>$(get_top_ram_procs)</code>
+${LINE}
 MSG
 }
 
 # =============================================================================
-# CEK DAN KIRIM NOTIFIKASI
+# 🤖 TELEGRAM BOT — MENU & KEYBOARD
+# =============================================================================
+
+KB_MAIN='{"inline_keyboard":[
+  [{"text":"📊 Status Server","callback_data":"status"},{"text":"🌐 Info Jaringan","callback_data":"network"}],
+  [{"text":"🔒 Kelola IP Block","callback_data":"ip_menu"},{"text":"🛡 Laporan SOC","callback_data":"soc"}],
+  [{"text":"📋 Top Proses","callback_data":"procs"},{"text":"🔄 Refresh","callback_data":"refresh"}]
+]}'
+
+KB_IP='{"inline_keyboard":[
+  [{"text":"📋 Lihat IP Blocked","callback_data":"ip_list"}],
+  [{"text":"🚫 Tambah Block IP","callback_data":"ip_add"},{"text":"✅ Hapus Block IP","callback_data":"ip_del"}],
+  [{"text":"🔙 Kembali","callback_data":"main_menu"}]
+]}'
+
+KB_BACK='{"inline_keyboard":[[{"text":"🔙 Kembali ke Menu","callback_data":"main_menu"}]]}'
+
+build_status_menu() {
+    local dom; dom=$(get_domain)
+    get_ram_usage; CPU_USAGE=$(get_cpu_usage); ACTIVE_CONN=$(get_active_connections)
+    AVG_RX_MBPS=$(get_avg_rx)
+
+    local di ds du da dp; IFS=',' read -r ds du da dp <<< "$(get_disk_info)"
+    local nd cd rd dd od
+    nd=$(status_dot "${AVG_RX_MBPS%.*}" "$THRESHOLD_MBPS")
+    cd=$(status_dot "${CPU_USAGE%.*}" "$THRESHOLD_CPU")
+    rd=$(status_dot "${RAM_PERCENT%.*}" "$THRESHOLD_RAM")
+    dd=$(status_dot "${dp:-0}" "$THRESHOLD_DISK")
+    od=$(status_dot "$ACTIVE_CONN" "$THRESHOLD_CONN")
+
+    cat <<MSG
+${LINE}
+📊 <b>STATUS SERVER</b>
+${LINE}
+🖥 <b>${dom}</b>
+📅 $(date '+%d/%m/%Y %H:%M:%S')
+⏱ $(uptime -p 2>/dev/null || echo "N/A")
+
+${nd} Jaringan  : ${AVG_RX_MBPS} Mbps
+${cd} CPU       : ${CPU_USAGE}% | Load $(get_cpu_load | awk '{print $1}')
+${rd} RAM       : ${RAM_PERCENT}% (${RAM_USED_MB}/${RAM_TOTAL_MB} MB)
+${dd} Disk      : ${dp}% (sisa ${da})
+${od} Koneksi   : ${ACTIVE_CONN} aktif
+${LINE}
+MSG
+}
+
+build_network_menu() {
+    local dom; dom=$(get_domain)
+    local nsp; nsp=$(make_sparkline "${NET_HISTORY[@]}")
+    cat <<MSG
+${LINE}
+🌐 <b>INFO JARINGAN</b>
+${LINE}
+🖥 <b>${dom}</b>
+📅 $(date '+%d/%m/%Y %H:%M:%S')
+
+↑ RX Avg : <b>${AVG_RX_MBPS} Mbps</b>
+↑ RX Now : ${RX_MBPS} Mbps
+↓ TX Now : ${TX_MBPS} Mbps
+🔌 Koneksi: ${ACTIVE_CONN}
+⚡ Batas  : ${THRESHOLD_MBPS} Mbps
+
+📈 Tren RX:
+<code>${nsp}</code>
+
+📍 <b>Top Koneksi IP:</b>
+<code>$(get_top_ips)</code>
+
+📡 <b>State Koneksi:</b>
+<code>$(get_conn_states)</code>
+${LINE}
+MSG
+}
+
+build_ip_list_msg() {
+    local cnt; cnt=$(ip_count)
+    cat <<MSG
+${LINE}
+🔒 <b>DAFTAR IP BLOCKED</b>
+${LINE}
+Total: <b>${cnt}</b> IP diblokir
+
+<code>$(ip_list)</code>
+${LINE}
+MSG
+}
+
+# =============================================================================
+# 🤖 BOT — HANDLER PESAN & CALLBACK
+# =============================================================================
+
+handle_command() {
+    local chat_id="$1" text="$2"
+
+    case "$text" in
+        /start|/menu|/help)
+            send_menu "$chat_id" \
+"${LINE}
+🤖 <b>SERVER MONITOR BOT</b>
+${LINE}
+Halo! Saya memantau server Anda secara real-time.
+Pilih menu di bawah ini:" \
+                "$KB_MAIN"
+            ;;
+        /status)
+            local smsg; smsg=$(build_status_menu)
+            send_menu "$chat_id" "$smsg" "$KB_BACK"
+            ;;
+        /block*)
+            local ip; ip=$(echo "$text" | awk '{print $2}')
+            if [ -z "$ip" ]; then
+                send_telegram_chat "$chat_id" "Gunakan: /block 1.2.3.4"
+            else
+                local res; res=$(ip_block "$ip")
+                case "$res" in
+                    OK)        send_telegram_chat "$chat_id" "✅ IP <code>${ip}</code> berhasil diblokir" ;;
+                    EXISTS)    send_telegram_chat "$chat_id" "ℹ️ IP <code>${ip}</code> sudah diblokir sebelumnya" ;;
+                    INVALID)   send_telegram_chat "$chat_id" "❌ Format IP tidak valid: <code>${ip}</code>" ;;
+                esac
+            fi
+            ;;
+        /unblock*)
+            local ip; ip=$(echo "$text" | awk '{print $2}')
+            if [ -z "$ip" ]; then
+                send_telegram_chat "$chat_id" "Gunakan: /unblock 1.2.3.4"
+            else
+                local res; res=$(ip_unblock "$ip")
+                case "$res" in
+                    OK)        send_telegram_chat "$chat_id" "✅ IP <code>${ip}</code> berhasil di-unblock" ;;
+                    NOT_FOUND) send_telegram_chat "$chat_id" "ℹ️ IP <code>${ip}</code> tidak ada di daftar block" ;;
+                esac
+            fi
+            ;;
+        /listip)
+            send_menu "$chat_id" "$(build_ip_list_msg)" "$KB_BACK"
+            ;;
+    esac
+}
+
+handle_callback() {
+    local chat_id="$1" msg_id="$2" cb_id="$3" data="$4"
+
+    answer_callback "$cb_id" ""
+
+    case "$data" in
+        main_menu)
+            edit_menu "$chat_id" "$msg_id" \
+"${LINE}
+🤖 <b>SERVER MONITOR BOT</b>
+${LINE}
+🖥 Server: <b>$(get_domain)</b>
+📅 $(date '+%d/%m/%Y %H:%M:%S')
+
+Pilih menu:" "$KB_MAIN"
+            ;;
+        status)
+            local smsg; smsg=$(build_status_menu)
+            edit_menu "$chat_id" "$msg_id" "$smsg" "$KB_BACK"
+            ;;
+        network)
+            edit_menu "$chat_id" "$msg_id" "$(build_network_menu)" "$KB_BACK"
+            ;;
+        ip_menu)
+            edit_menu "$chat_id" "$msg_id" \
+"${LINE}
+🔒 <b>KELOLA IP BLOCK</b>
+${LINE}
+Total diblokir: <b>$(ip_count)</b> IP
+
+Pilih tindakan:" "$KB_IP"
+            ;;
+        ip_list)
+            edit_menu "$chat_id" "$msg_id" "$(build_ip_list_msg)" "$KB_BACK"
+            ;;
+        ip_add)
+            BOT_WAITING_IP="$chat_id"
+            BOT_WAITING_ACTION="block"
+            edit_menu "$chat_id" "$msg_id" \
+"${LINE}
+🚫 <b>TAMBAH IP BLOCK</b>
+${LINE}
+Kirim IP address yang ingin diblokir.
+
+Contoh: <code>192.168.1.100</code>
+Atau dengan prefix: <code>10.0.0.0/24</code>
+
+Ketik /batal untuk membatalkan." "$KB_BACK"
+            ;;
+        ip_del)
+            if [ "$(ip_count)" -eq 0 ]; then
+                answer_callback "$cb_id" "Tidak ada IP yang diblokir"
+                return
+            fi
+            BOT_WAITING_IP="$chat_id"
+            BOT_WAITING_ACTION="unblock"
+            edit_menu "$chat_id" "$msg_id" \
+"${LINE}
+✅ <b>HAPUS BLOCK IP</b>
+${LINE}
+<b>IP yang sedang diblokir:</b>
+<code>$(ip_list)</code>
+
+Kirim IP yang ingin di-unblock.
+Ketik /batal untuk membatalkan." "$KB_BACK"
+            ;;
+        soc)
+            get_ram_usage; CPU_USAGE=$(get_cpu_usage)
+            local failed; failed=$(get_failed_ssh_count)
+            local smsg; smsg=$(msg_soc "$(get_domain)" "$failed")
+            edit_menu "$chat_id" "$msg_id" "$smsg" "$KB_BACK"
+            ;;
+        procs)
+            edit_menu "$chat_id" "$msg_id" "$(msg_top_procs "$(get_domain)")" "$KB_BACK"
+            ;;
+        refresh)
+            answer_callback "$cb_id" "🔄 Memperbarui data..."
+            get_ram_usage; CPU_USAGE=$(get_cpu_usage); ACTIVE_CONN=$(get_active_connections)
+            local smsg; smsg=$(build_status_menu)
+            edit_menu "$chat_id" "$msg_id" "$smsg" "$KB_BACK"
+            ;;
+    esac
+}
+
+handle_ip_input() {
+    local chat_id="$1" text="$2"
+
+    if [ "$text" = "/batal" ]; then
+        BOT_WAITING_IP=""
+        BOT_WAITING_ACTION=""
+        send_menu "$chat_id" "❌ Dibatalkan." "$KB_IP"
+        return
+    fi
+
+    local ip; ip=$(echo "$text" | tr -d ' ')
+    local res
+
+    if [ "$BOT_WAITING_ACTION" = "block" ]; then
+        res=$(ip_block "$ip")
+        case "$res" in
+            OK)
+                send_menu "$chat_id" \
+"✅ <b>IP Berhasil Diblokir!</b>
+
+🚫 IP: <code>${ip}</code>
+📅 $(date '+%d/%m/%Y %H:%M:%S')
+📋 Total blokir: $(ip_count) IP" "$KB_IP"
+                ;;
+            EXISTS)
+                send_menu "$chat_id" "ℹ️ IP <code>${ip}</code> sudah ada di daftar block." "$KB_IP"
+                ;;
+            INVALID)
+                send_telegram_chat "$chat_id" \
+"❌ <b>Format IP tidak valid!</b>
+
+Contoh yang benar:
+• <code>192.168.1.100</code>
+• <code>10.0.0.0/24</code>
+
+Coba kirim lagi:"
+                return
+                ;;
+        esac
+    elif [ "$BOT_WAITING_ACTION" = "unblock" ]; then
+        res=$(ip_unblock "$ip")
+        case "$res" in
+            OK)
+                send_menu "$chat_id" \
+"✅ <b>IP Berhasil Di-unblock!</b>
+
+🔓 IP: <code>${ip}</code>
+📅 $(date '+%d/%m/%Y %H:%M:%S')
+📋 Sisa blokir: $(ip_count) IP" "$KB_IP"
+                ;;
+            NOT_FOUND)
+                send_menu "$chat_id" \
+"❌ IP <code>${ip}</code> tidak ditemukan di daftar block.
+
+<b>IP yang tersedia:</b>
+<code>$(ip_list)</code>" "$KB_IP"
+                ;;
+        esac
+    fi
+
+    BOT_WAITING_IP=""
+    BOT_WAITING_ACTION=""
+}
+
+# =============================================================================
+# 🔄 BOT POLLING LOOP
+# =============================================================================
+
+run_bot_listener() {
+    log "Bot listener started (polling)"
+
+    while true; do
+        local resp
+        resp=$(get_updates 2>/dev/null)
+
+        if ! echo "$resp" | grep -q '"ok":true'; then
+            sleep 5; continue
+        fi
+
+        # Count updates
+        local count
+        count=$(echo "$resp" | grep -o '"update_id"' | wc -l)
+        [ "$count" -eq 0 ] && sleep 1 && continue
+
+        # Process each update
+        local i=1
+        while [ "$i" -le "$count" ]; do
+            local upd
+            upd=$(echo "$resp" | awk -v n="$i" 'BEGIN{d=0;c=0}
+                /"update_id"/{c++;if(c==n)d=1}
+                d{print}
+                d&&/^\s*\}/{if(d){d=0;exit}}' 2>/dev/null || echo "")
+
+            local upd_id chat_id text data msg_id cb_id
+
+            upd_id=$(echo "$resp" | grep -o '"update_id":[0-9]*' | awk -v n="$i" 'NR==n{gsub(/[^0-9]/,"",$0);print}')
+
+            if [ -n "$upd_id" ]; then
+                BOT_OFFSET=$((upd_id + 1))
+            fi
+
+            # Try to parse via raw grep on the full response (per update_id offset)
+            local raw_update
+            raw_update=$(echo "$resp" | grep -A 100 "\"update_id\":${upd_id}" | head -80)
+
+            # Extract message fields
+            chat_id=$(echo "$raw_update" | grep -o '"id":-\?[0-9]*' | head -1 | grep -o '-\?[0-9]*')
+            msg_id=$(echo "$raw_update" | grep -o '"message_id":[0-9]*' | head -1 | grep -o '[0-9]*$')
+            text=$(echo "$raw_update" | grep '"text"' | head -1 | sed 's/.*"text":"\(.*\)".*/\1/' | sed 's/\\//g')
+            cb_id=$(echo "$raw_update" | grep '"callback_query"' | head -1)
+            data=$(echo "$raw_update" | grep '"data"' | head -1 | sed 's/.*"data":"\(.*\)".*/\1/')
+
+            if [ -n "$cb_id" ] && [ -n "$data" ]; then
+                # It's a callback query
+                local cq_id
+                cq_id=$(echo "$raw_update" | grep '"id"' | grep -v '"user"\|"chat"\|"message"' | head -1 | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+                chat_id=$(echo "$raw_update" | grep -o '"id":-\?[0-9]*' | head -2 | tail -1 | grep -o '-\?[0-9]*')
+                cq_id=$(echo "$raw_update" | sed -n 's/.*"callback_query".*"id":"\([^"]*\)".*/\1/p' | head -1)
+                msg_id=$(echo "$raw_update" | grep -o '"message_id":[0-9]*' | head -1 | grep -o '[0-9]*$')
+                handle_callback "$chat_id" "$msg_id" "$cq_id" "$data"
+            elif [ -n "$text" ] && [ -n "$chat_id" ]; then
+                # It's a message
+                if [ "$chat_id" = "$BOT_WAITING_IP" ] && [ -n "$BOT_WAITING_ACTION" ]; then
+                    handle_ip_input "$chat_id" "$text"
+                elif echo "$text" | grep -q '^/'; then
+                    handle_command "$chat_id" "$text"
+                fi
+            fi
+
+            i=$((i+1))
+        done
+
+        sleep 1
+    done
+}
+
+# =============================================================================
+# 🔔 NOTIFIKASI MONITORING
 # =============================================================================
 
 notify_ddos() {
-    local domain="$1"
-    local current_time="$2"
-    local avg_rx="$3"
-
-    if float_gt "$avg_rx" "$THRESHOLD_MBPS"; then
-        if (( current_time - LAST_NOTIFY_DDOS >= NOTIFY_INTERVAL_DDOS )); then
-            log "DDoS detected: avg_rx=${avg_rx} Mbps threshold=${THRESHOLD_MBPS} Mbps" "WARN"
-            local net_spark
-            net_spark=$(make_sparkline "${NET_HISTORY[@]}")
-            local msg
-            msg=$(msg_ddos_alert "$domain" "$avg_rx" "$net_spark")
-            send_telegram "$msg" && LAST_NOTIFY_DDOS=$current_time
-        fi
-        return 0
-    fi
-    return 1
+    local dom="$1" now="$2" avg="$3"
+    float_gt "$avg" "$THRESHOLD_MBPS" || return 1
+    (( now - LAST_NOTIFY_DDOS >= NOTIFY_INTERVAL_DDOS )) || return 0
+    log "DDoS detected: avg=${avg} Mbps" "WARN"
+    local spark; spark=$(make_sparkline "${NET_HISTORY[@]}")
+    send_telegram "$(msg_ddos "$dom" "$avg" "$spark")"
+    LAST_NOTIFY_DDOS=$now
+    return 0
 }
 
 notify_normal() {
-    local domain="$1"
-    local current_time="$2"
-    local avg_rx="$3"
-
-    if (( current_time - LAST_NOTIFY_NORMAL >= NOTIFY_INTERVAL_NORMAL )); then
-        log "Normal status report: avg_rx=${avg_rx} Mbps"
-        local msg
-        msg=$(msg_status_report "$domain" "$avg_rx")
-        send_telegram "$msg" && LAST_NOTIFY_NORMAL=$current_time
-
-        local proc_msg
-        proc_msg=$(msg_top_processes "$domain")
-        send_telegram "$proc_msg"
-    fi
+    local dom="$1" now="$2" avg="$3"
+    (( now - LAST_NOTIFY_NORMAL >= NOTIFY_INTERVAL_NORMAL )) || return
+    log "Normal status report"
+    send_telegram "$(msg_status "$dom" "$avg")"
+    send_telegram "$(msg_top_procs "$dom")"
+    LAST_NOTIFY_NORMAL=$now
 }
 
-notify_cpu_alert() {
-    local domain="$1"
-    local current_time="$2"
-
-    if float_ge "$CPU_USAGE" "$THRESHOLD_CPU"; then
-        if (( current_time - LAST_NOTIFY_CPU >= NOTIFY_INTERVAL_ALERT )); then
-            log "CPU alert: ${CPU_USAGE}% >= ${THRESHOLD_CPU}%" "WARN"
-            local top_procs
-            top_procs=$(get_top_cpu_processes)
-            local detail
-            detail="💻 <b>Top Proses CPU:</b>
-<code>USER      CPU%    COMMAND
-${top_procs}</code>"
-            local msg
-            msg=$(msg_resource_alert "$domain" "CPU TINGGI" "${CPU_USAGE}%" "${THRESHOLD_CPU}%" "$detail")
-            send_telegram "$msg" && LAST_NOTIFY_CPU=$current_time
-        fi
-    fi
+notify_cpu() {
+    local dom="$1" now="$2"
+    float_ge "$CPU_USAGE" "$THRESHOLD_CPU" || return
+    (( now - LAST_NOTIFY_CPU >= NOTIFY_INTERVAL_ALERT )) || return
+    log "CPU alert: ${CPU_USAGE}%" "WARN"
+    local detail; detail="💻 <b>Top CPU:</b>
+<code>$(get_top_cpu_procs)</code>"
+    send_telegram "$(msg_alert "$dom" "CPU TINGGI" "${CPU_USAGE}%" "${THRESHOLD_CPU}%" "$detail")"
+    LAST_NOTIFY_CPU=$now
 }
 
-notify_ram_alert() {
-    local domain="$1"
-    local current_time="$2"
-
-    if float_ge "$RAM_PERCENT" "$THRESHOLD_RAM"; then
-        if (( current_time - LAST_NOTIFY_RAM >= NOTIFY_INTERVAL_ALERT )); then
-            log "RAM alert: ${RAM_PERCENT}% >= ${THRESHOLD_RAM}%" "WARN"
-            local top_procs
-            top_procs=$(get_top_ram_processes)
-            local detail
-            detail="🧠 <b>Top Proses RAM:</b>
-<code>USER      MEM%    COMMAND
-${top_procs}</code>
+notify_ram() {
+    local dom="$1" now="$2"
+    float_ge "$RAM_PERCENT" "$THRESHOLD_RAM" || return
+    (( now - LAST_NOTIFY_RAM >= NOTIFY_INTERVAL_ALERT )) || return
+    log "RAM alert: ${RAM_PERCENT}%" "WARN"
+    local detail; detail="🧠 <b>Top RAM:</b>
+<code>$(get_top_ram_procs)</code>
 🔄 Swap: ${SWAP_USED_MB}/${SWAP_TOTAL_MB} MB"
-            local msg
-            msg=$(msg_resource_alert "$domain" "RAM TINGGI" "${RAM_PERCENT}%" "${THRESHOLD_RAM}%" "$detail")
-            send_telegram "$msg" && LAST_NOTIFY_RAM=$current_time
-        fi
-    fi
+    send_telegram "$(msg_alert "$dom" "RAM TINGGI" "${RAM_PERCENT}%" "${THRESHOLD_RAM}%" "$detail")"
+    LAST_NOTIFY_RAM=$now
 }
 
-notify_disk_alert() {
-    local domain="$1"
-    local current_time="$2"
-
-    local disk_info disk_size disk_used disk_avail disk_pct
-    disk_info=$(get_disk_info)
-    IFS=',' read -r disk_size disk_used disk_avail disk_pct <<< "$disk_info"
-
-    if [ -n "$disk_pct" ] && float_ge "$disk_pct" "$THRESHOLD_DISK"; then
-        if (( current_time - LAST_NOTIFY_DISK >= NOTIFY_INTERVAL_ALERT )); then
-            log "Disk alert: ${disk_pct}% >= ${THRESHOLD_DISK}%" "WARN"
-            local big_dirs
-            big_dirs=$(get_biggest_dirs)
-            local detail
-            detail="💿 ${disk_used} dipakai dari ${disk_size} (sisa ${disk_avail})
-
-📂 <b>Direktori Terbesar:</b>
-<code>${big_dirs}</code>"
-            local msg
-            msg=$(msg_resource_alert "$domain" "DISK HAMPIR PENUH" "${disk_pct}%" "${THRESHOLD_DISK}%" "$detail")
-            send_telegram "$msg" && LAST_NOTIFY_DISK=$current_time
-        fi
-    fi
+notify_disk() {
+    local dom="$1" now="$2"
+    local di ds du da dp; IFS=',' read -r ds du da dp <<< "$(get_disk_info)"
+    [ -z "$dp" ] || [ "$dp" = "0" ] && return
+    float_ge "$dp" "$THRESHOLD_DISK" || return
+    (( now - LAST_NOTIFY_DISK >= NOTIFY_INTERVAL_ALERT )) || return
+    log "Disk alert: ${dp}%" "WARN"
+    local detail; detail="💿 ${du} terpakai dari ${ds} (sisa ${da})"
+    send_telegram "$(msg_alert "$dom" "DISK HAMPIR PENUH" "${dp}%" "${THRESHOLD_DISK}%" "$detail")"
+    LAST_NOTIFY_DISK=$now
 }
 
-notify_conn_alert() {
-    local domain="$1"
-    local current_time="$2"
-
-    if (( ACTIVE_CONN >= THRESHOLD_CONN )); then
-        if (( current_time - LAST_NOTIFY_CONN >= NOTIFY_INTERVAL_ALERT )); then
-            log "Connection alert: ${ACTIVE_CONN} >= ${THRESHOLD_CONN}" "WARN"
-            local top_ips top_ports conn_states
-            top_ips=$(get_top_ips)
-            top_ports=$(get_top_ports)
-            conn_states=$(get_connection_states)
-            local detail
-            detail="🔗 <b>State Koneksi:</b>
-<code>${conn_states}</code>
-
-📍 <b>Top IP:</b>
-<code>${top_ips}</code>
-
-🔌 <b>Top Port:</b>
-<code>${top_ports}</code>"
-            local msg
-            msg=$(msg_resource_alert "$domain" "KONEKSI BERLEBIHAN" "$ACTIVE_CONN" "$THRESHOLD_CONN" "$detail")
-            send_telegram "$msg" && LAST_NOTIFY_CONN=$current_time
-        fi
-    fi
+notify_conn() {
+    local dom="$1" now="$2"
+    (( ACTIVE_CONN >= THRESHOLD_CONN )) || return
+    (( now - LAST_NOTIFY_CONN >= NOTIFY_INTERVAL_ALERT )) || return
+    log "Connection alert: ${ACTIVE_CONN}" "WARN"
+    local detail; detail="📡 <b>Top IP:</b>
+<code>$(get_top_ips)</code>
+📊 <b>States:</b>
+<code>$(get_conn_states)</code>"
+    send_telegram "$(msg_alert "$dom" "KONEKSI BERLEBIHAN" "$ACTIVE_CONN" "$THRESHOLD_CONN" "$detail")"
+    LAST_NOTIFY_CONN=$now
 }
 
 notify_soc() {
-    local domain="$1"
-    local current_time="$2"
-
-    if (( current_time - LAST_NOTIFY_SOC >= NOTIFY_INTERVAL_SOC )); then
-        local failed_count
-        failed_count=$(get_failed_ssh_count)
-        log "SOC check: failed_logins=$failed_count"
-
-        local rfile
-        rfile=$(generate_soc_report)
-        log "SOC report saved: $rfile"
-
-        local msg
-        msg=$(msg_soc_report "$domain" "$failed_count")
-        send_telegram "$msg" && LAST_NOTIFY_SOC=$current_time
-    fi
+    local dom="$1" now="$2"
+    (( now - LAST_NOTIFY_SOC >= NOTIFY_INTERVAL_SOC )) || return
+    local failed; failed=$(get_failed_ssh_count)
+    log "SOC check: failed=${failed}"
+    local rf; rf=$(generate_soc_report)
+    log "SOC report: $rf"
+    send_telegram "$(msg_soc "$dom" "$failed")"
+    LAST_NOTIFY_SOC=$now
 }
 
 # =============================================================================
-# MAIN LOOP
+# 🚀 MAIN LOOP
 # =============================================================================
 
 main() {
     init_dirs
 
-    local domain
-    domain=$(get_domain)
-    log "Starting monitor | domain=$domain | iface=$INTERFACE | thresholds: net=${THRESHOLD_MBPS}Mbps cpu=${THRESHOLD_CPU}% ram=${THRESHOLD_RAM}% disk=${THRESHOLD_DISK}%"
+    local domain; domain=$(get_domain)
+    log "Starting | domain=${domain} | iface=${INTERFACE}"
+
+    # Kirim notifikasi startup
+    send_menu "$CHAT_ID" \
+"${LINE}
+✅ <b>SERVER MONITOR AKTIF</b>
+${LINE}
+🖥 Server : <b>${domain}</b>
+📅 Mulai  : $(date '+%d/%m/%Y %H:%M:%S')
+🌐 Iface  : ${INTERFACE}
+⚡ Batas DDoS : ${THRESHOLD_MBPS} Mbps
+
+Gunakan menu untuk kontrol bot:" "$KB_MAIN"
+
+    # Jalankan bot listener di background
+    run_bot_listener &
+    BOT_PID=$!
+    log "Bot listener PID: $BOT_PID"
 
     local prev_rx prev_tx
-    prev_rx=$(get_rx_bytes)
-    prev_tx=$(get_tx_bytes)
+    prev_rx=$(get_rx_bytes); prev_tx=$(get_tx_bytes)
 
+    # Monitoring loop
     while true; do
         sleep "$SLEEP_INTERVAL"
 
         get_network_stats "$prev_rx" "$prev_tx"
         update_net_samples
         AVG_RX_MBPS=$(get_avg_rx)
-
         get_ram_usage
         CPU_USAGE=$(get_cpu_usage)
         ACTIVE_CONN=$(get_active_connections)
-
         update_history
 
         prev_rx=$CURR_RX_BYTES
         prev_tx=$CURR_TX_BYTES
 
-        log "RX:${RX_MBPS} TX:${TX_MBPS} AvgRX:${AVG_RX_MBPS} CPU:${CPU_USAGE}% RAM:${RAM_PERCENT}% Conn:${ACTIVE_CONN}"
+        log "RX:${RX_MBPS} TX:${TX_MBPS} Avg:${AVG_RX_MBPS} CPU:${CPU_USAGE}% RAM:${RAM_PERCENT}% Conn:${ACTIVE_CONN}"
 
-        local now
-        now=$(date +%s)
+        local now; now=$(date +%s)
 
         if ! notify_ddos "$domain" "$now" "$AVG_RX_MBPS"; then
             notify_normal "$domain" "$now" "$AVG_RX_MBPS"
         fi
 
-        notify_cpu_alert "$domain" "$now"
-        notify_ram_alert "$domain" "$now"
-        notify_disk_alert "$domain" "$now"
-        notify_conn_alert "$domain" "$now"
+        notify_cpu "$domain" "$now"
+        notify_ram "$domain" "$now"
+        notify_disk "$domain" "$now"
+        notify_conn "$domain" "$now"
         notify_soc "$domain" "$now"
     done
 }
 
 # =============================================================================
-# ENTRY POINT
+# 📌 ENTRY POINT
 # =============================================================================
 
 case "${1:-start}" in
     start)
         main
         ;;
-
+    bot-only)
+        init_dirs
+        log "Bot-only mode started"
+        run_bot_listener
+        ;;
     test-telegram)
-        domain=$(get_domain)
-        echo "Mengirim test notifikasi ke Telegram..."
-        send_telegram "🧪 <b>TEST NOTIFIKASI</b>
-🌐 Domain: ${domain}
-🕐 Waktu: $(date '+%Y-%m-%d %H:%M:%S')
-✅ Script monitor aktif dan siap berjalan"
-        echo "Selesai. Cek Telegram Anda."
-        ;;
+        dom=$(get_domain)
+        send_menu "$CHAT_ID" \
+"${LINE}
+🧪 <b>TEST KONEKSI BOT</b>
+${LINE}
+🖥 Server : ${dom}
+📅 Waktu  : $(date '+%d/%m/%Y %H:%M:%S')
+✅ Bot berfungsi dengan baik!
 
-    test-soc)
-        echo "=== SOC CREDENTIAL ANALYSIS TEST ==="
-        echo ""
-        echo "Failed login count: $(get_failed_ssh_count)"
-        echo ""
-        echo "Top failed IPs:"
-        get_top_failed_ips
-        echo ""
-        echo "Brute force IPs (>=10 attempts):"
-        get_brute_force_ips
-        echo ""
-        echo "Active SSH sessions:"
-        get_active_ssh_sessions
-        echo ""
-        echo "Sudo events:"
-        get_sudo_events
-        echo ""
-        echo "Port scan count: $(get_port_scan_count)"
-        echo ""
-        rfile=$(generate_soc_report)
-        echo "Full report saved to: $rfile"
+Gunakan menu di bawah:" \
+"$KB_MAIN"
+        echo "✅ Test berhasil. Cek Telegram Anda."
         ;;
-
     test-resources)
-        echo "=== RESOURCE MONITORING TEST ==="
-        get_ram_usage
-        CPU_USAGE=$(get_cpu_usage)
-        ACTIVE_CONN=$(get_active_connections)
-        echo ""
+        echo "=== RESOURCE TEST ==="
+        get_ram_usage; CPU_USAGE=$(get_cpu_usage); ACTIVE_CONN=$(get_active_connections)
         echo "CPU    : ${CPU_USAGE}%  (load: $(get_cpu_load))"
-        echo "RAM    : ${RAM_PERCENT}%  (${RAM_USED_MB}MB used / ${RAM_TOTAL_MB}MB total)"
-        echo "Swap   : ${SWAP_USED_MB}MB / ${SWAP_TOTAL_MB}MB"
-        echo "Disk   : $(get_disk_info | tr ',' ' ' | awk '{print $4"%  ("$2"used/"$1"total, "$3" avail)"}')"
-        echo "Conn   : ${ACTIVE_CONN} active"
-        echo ""
-        echo "Top CPU processes:"
-        get_top_cpu_processes
-        echo ""
-        echo "Top RAM processes:"
-        get_top_ram_processes
-        echo ""
-        echo "Connection states:"
-        get_connection_states
-        echo ""
-        echo "Top IPs:"
-        get_top_ips
+        echo "RAM    : ${RAM_PERCENT}%  (${RAM_USED_MB}/${RAM_TOTAL_MB} MB)"
+        echo "Swap   : ${SWAP_USED_MB}/${SWAP_TOTAL_MB} MB"
+        IFS=',' read -r ds du da dp <<< "$(get_disk_info)"
+        echo "Disk   : ${dp}%  (${du}/${ds}, sisa ${da})"
+        echo "Conn   : ${ACTIVE_CONN} aktif"
+        echo ""; echo "Top CPU:"; get_top_cpu_procs
+        echo ""; echo "Top RAM:"; get_top_ram_procs
         ;;
-
-    test-network)
-        echo "=== NETWORK MONITORING TEST ==="
-        INTERFACE="${2:-$INTERFACE}"
-        echo "Interface: $INTERFACE"
-        prev_rx=$(get_rx_bytes)
-        prev_tx=$(get_tx_bytes)
-        sleep 2
-        get_network_stats "$prev_rx" "$prev_tx"
-        echo "RX: ${RX_MBPS} Mb/s"
-        echo "TX: ${TX_MBPS} Mb/s"
+    test-soc)
+        echo "=== SOC TEST ==="
+        echo "Failed logins: $(get_failed_ssh_count)"
+        echo ""; echo "Top failed IPs:"; get_top_failed_ips
+        echo ""; echo "Brute force:"; get_brute_force_ips
+        echo ""; echo "Active SSH:"; get_active_ssh
+        rf=$(generate_soc_report)
+        echo ""; echo "Report: $rf"
         ;;
-
-    test-graphs)
-        echo "=== GRAFIK ASCII TEST ==="
-        declare -a test_vals=(10 25 40 55 70 85 60 45 30 80 90 75 50 35 65 55 45 70 80 60)
-        echo "Test sparkline:"
-        make_sparkline "${test_vals[@]}"
-        echo ""
-        echo "Test bar 65%:"
-        make_bar 65 100 20
-        echo ""
-        echo "Test bar 30%:"
-        make_bar 30 100 20
+    block)
+        [ -z "$2" ] && echo "Usage: $0 block <IP>" && exit 1
+        r=$(ip_block "$2")
+        case "$r" in
+            OK)        echo "✅ IP $2 diblokir" ;;
+            EXISTS)    echo "ℹ️ IP $2 sudah diblokir" ;;
+            INVALID)   echo "❌ Format IP tidak valid: $2" ;;
+        esac
         ;;
-
+    unblock)
+        [ -z "$2" ] && echo "Usage: $0 unblock <IP>" && exit 1
+        r=$(ip_unblock "$2")
+        case "$r" in
+            OK)        echo "✅ IP $2 di-unblock" ;;
+            NOT_FOUND) echo "ℹ️ IP $2 tidak ditemukan di daftar block" ;;
+        esac
+        ;;
+    listip)
+        echo "=== IP BLOCKED LIST ==="
+        ip_list
+        echo "Total: $(ip_count) IP"
+        ;;
     status)
-        if pgrep -f "monitor-server.sh start" > /dev/null 2>&1; then
-            echo "Monitor status: RUNNING"
-            echo "PID: $(pgrep -f "monitor-server.sh start")"
-        else
-            echo "Monitor status: NOT RUNNING"
-        fi
+        pgrep -f "monitor-server.sh start" >/dev/null 2>&1 && \
+            echo "✅ Monitor RUNNING (PID: $(pgrep -f 'monitor-server.sh start'))" || \
+            echo "❌ Monitor NOT running"
         ;;
-
     stop)
-        if pgrep -f "monitor-server.sh start" > /dev/null 2>&1; then
-            pkill -f "monitor-server.sh start"
-            echo "Monitor dihentikan."
-        else
-            echo "Monitor tidak sedang berjalan."
-        fi
+        pkill -f "monitor-server.sh start" 2>/dev/null && echo "⛔ Monitor dihentikan." || echo "Tidak ada proses yang berjalan."
         ;;
-
     *)
         cat <<USAGE
 Penggunaan: $0 <perintah>
 
-Perintah:
-  start            Mulai monitoring (mode daemon)
-  stop             Hentikan monitoring
-  status           Cek status monitoring
+  start          Mulai monitoring + bot Telegram
+  stop           Hentikan monitoring
+  status         Cek status
 
-  test-telegram    Test kirim notifikasi ke Telegram
-  test-soc         Test analisis log keamanan/credential
-  test-resources   Test monitoring CPU, RAM, disk, koneksi
-  test-network     Test monitoring jaringan
-  test-graphs      Test grafik ASCII sparkline
+  block <IP>     Blokir IP address
+  unblock <IP>   Hapus blokir IP
+  listip         Tampilkan daftar IP blocked
 
-Contoh:
-  $0 start
-  $0 test-telegram
-  $0 test-resources
+  test-telegram  Test koneksi Telegram + tampilkan menu
+  test-resources Test monitoring CPU/RAM/Disk
+  test-soc       Test analisis keamanan SOC
 USAGE
         exit 1
         ;;
