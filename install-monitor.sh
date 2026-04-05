@@ -356,18 +356,16 @@ do_help() {
 ${BOLD}PENGGUNAAN:${NC}
 
   ${CYAN}Install baru:${NC}
-    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \\
-      --token "TOKEN_BOT" --chatid "CHAT_ID"
+    curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --token "TOKEN_BOT" --chatid "CHAT_ID"
 
   ${CYAN}Install dengan interface custom:${NC}
-    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \\
-      --token "TOKEN_BOT" --chatid "CHAT_ID" --iface "eth0"
+    curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --token "TOKEN_BOT" --chatid "CHAT_ID" --iface "eth0"
 
   ${CYAN}Update ke versi terbaru:${NC}
-    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --update
+    curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --update
 
   ${CYAN}Uninstall:${NC}
-    bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --uninstall
+    curl -sL https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh | sudo bash -s -- --uninstall
 
 ${BOLD}PARAMETER:${NC}
   --token TOKEN     Telegram Bot Token dari @BotFather
