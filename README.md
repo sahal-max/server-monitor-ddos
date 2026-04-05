@@ -116,66 +116,41 @@ Total diblokir: 3 IP
 
 ### Prasyarat
 - Linux dengan `systemd` (Ubuntu 18+, Debian 9+, CentOS 7+)
-- `curl`, `awk`, `ss` / `netstat` tersedia
 - Akses `root` / `sudo`
 - Bot Telegram aktif (buat via [@BotFather](https://t.me/BotFather))
+- Koneksi internet (untuk download script dari GitHub)
 
-### Langkah Instalasi
+### ⚡ Install — 1 Perintah
 
-**1. Download script**
+Cukup jalankan perintah ini di server, ganti `TOKEN_BOT` dan `CHAT_ID` dengan milik Anda:
 
 ```bash
-cd /tmp
-curl -O https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/monitor-server.sh
-curl -O https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh
-chmod +x monitor-server.sh install-monitor.sh
+bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
+  --token "TOKEN_BOT" --chatid "CHAT_ID"
 ```
 
-**2. Konfigurasi Telegram**
-
-Edit bagian konfigurasi di `monitor-server.sh`:
+Interface jaringan otomatis terdeteksi. Untuk set manual tambahkan `--iface eth0`:
 
 ```bash
-nano monitor-server.sh
-```
-
-```bash
-TELEGRAM_TOKEN="ISIKAN_TOKEN_BOT_ANDA"
-CHAT_ID="ISIKAN_CHAT_ID_GRUP_ATAU_PRIBADI"
-INTERFACE="eth0"          # Sesuaikan interface jaringan
-THRESHOLD_MBPS=150        # Batas DDoS dalam Mbps
+bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) \
+  --token "TOKEN_BOT" --chatid "CHAT_ID" --iface "eth0"
 ```
 
 > **Cara dapat Chat ID:** Tambahkan bot ke grup → kirim pesan → buka `https://api.telegram.org/bot<TOKEN>/getUpdates`
 
-**3. Test sebelum install**
-
-```bash
-# Test koneksi Telegram + tampilkan menu bot
-bash monitor-server.sh test-telegram
-
-# Test baca resource sistem
-bash monitor-server.sh test-resources
-```
-
-**4. Install sebagai systemd service**
-
-```bash
-sudo bash install-monitor.sh
-```
-
-Installer otomatis:
-- Salin script ke `/usr/local/bin/`
-- Buat systemd service
+Installer otomatis akan:
+- Download `monitor-server.sh` terbaru dari GitHub
+- Konfigurasi token, chat ID, dan interface
+- Buat systemd service dengan auto-start
 - Setup log rotation
-- Aktifkan auto-start saat boot
 
-**5. Verifikasi aktif**
+**Verifikasi setelah install:**
 
 ```bash
 systemctl status server-monitor
-journalctl -u server-monitor -f
 ```
+
+Lalu kirim `/start` ke bot Telegram — menu interaktif langsung muncul.
 
 ---
 
@@ -353,47 +328,21 @@ Script secara otomatis menganalisis log sistem dan mengirim laporan keamanan set
 
 ## 🔄 Update & Uninstall
 
-### Update Otomatis
+### ⚡ Update — 1 Perintah
+
+Konfigurasi (token, chatid, interface) otomatis dipertahankan dari instalasi sebelumnya:
 
 ```bash
-curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/monitor-server.sh \
-    -o /usr/local/bin/monitor-server.sh && \
-systemctl restart server-monitor && \
-echo "✅ Update berhasil!"
+bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --update
 ```
 
-### Update Manual
+### ⚡ Uninstall — 1 Perintah
 
 ```bash
-cd /tmp
-curl -O https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/monitor-server.sh
-# Edit ulang konfigurasi (token, chat_id, interface)
-nano monitor-server.sh
-sudo cp monitor-server.sh /usr/local/bin/
-sudo systemctl restart server-monitor
+bash <(curl -s https://raw.githubusercontent.com/sahal-max/server-monitor-ddos/main/install-monitor.sh) --uninstall
 ```
 
-### Uninstall
-
-**Otomatis:**
-
-```bash
-sudo bash /tmp/install-monitor.sh uninstall
-```
-
-**Manual:**
-
-```bash
-systemctl stop server-monitor
-systemctl disable server-monitor
-rm -f /etc/systemd/system/server-monitor.service
-rm -f /usr/local/bin/monitor-server.sh
-rm -f /etc/logrotate.d/server-monitor
-systemctl daemon-reload
-echo "✅ Uninstall selesai"
-```
-
-> ⚠️ Data di `/var/log/server-monitor.log`, `/var/log/soc-reports/`, dan `/var/log/server-monitor-blocked-ips.txt` tidak ikut terhapus.
+> ⚠️ Log dan daftar IP blocked tidak ikut terhapus: `/var/log/server-monitor.log`, `/var/log/soc-reports/`, `/var/log/server-monitor-blocked-ips.txt`
 
 ---
 
